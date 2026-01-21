@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pkl
+*.pt
+*.pth
+*.ckpt
+*.log
+.ipynb_checkpoints/
+.pytest_cache/
+checkpoints/
+dist/
+build/
+.DS_Store
+Thumbs.db
+

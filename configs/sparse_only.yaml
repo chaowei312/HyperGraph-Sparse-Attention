@@ -1,0 +1,15 @@
+# Sparse only: All HyperGraph sparse attention
+# Test sparse attention in isolation
+
+model:
+  dim: 512
+  num_heads: 8
+  
+  # All sparse blocks
+  n_standard_blocks: 0
+  n_sparse_blocks: 8
+  num_hyper_nodes: 4
+
+training:
+  wandb_run_name: "sparse-only-0std-8sparse-k4"
+

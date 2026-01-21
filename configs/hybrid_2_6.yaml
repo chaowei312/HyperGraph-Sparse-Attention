@@ -1,0 +1,15 @@
+# Hybrid: 2 standard + 6 sparse
+# Minimal standard blocks, mostly sparse
+
+model:
+  dim: 512
+  num_heads: 8
+  
+  # 2 standard -> 6 sparse
+  n_standard_blocks: 2
+  n_sparse_blocks: 6
+  num_hyper_nodes: 4
+
+training:
+  wandb_run_name: "hybrid-2std-6sparse-k4"
+

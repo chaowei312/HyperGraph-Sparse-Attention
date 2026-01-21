@@ -1,0 +1,14 @@
+# Baseline: Standard attention only (no sparse)
+# For comparison against sparse variants
+
+model:
+  dim: 512
+  num_heads: 8
+  
+  # All standard blocks, no sparse
+  n_standard_blocks: 8
+  n_sparse_blocks: 0
+
+training:
+  wandb_run_name: "baseline-8std-0sparse"
+
