@@ -1,40 +1,32 @@
 """
-Standard GPT-2 tokenizer for academic research.
+Fast tiktoken-based tokenizer for academic research.
 
-GPT-2 BPE tokenizer (50257 vocab) is the most common baseline in 
-language modeling research, ensuring fair comparisons across experiments.
+tiktoken is 10-100x faster than transformers and used in GPT-3/4.
+Perfect for demos and academic benchmarking.
 """
 
 from typing import Optional, List, Union, Dict, Any
 import torch
 
 
-class Tokenizer:
+class FastTokenizer:
     """
-    GPT-2 tokenizer wrapper for research use.
+    Fast GPT-2 compatible tokenizer using tiktoken.
     
-    Uses the standard GPT-2 BPE tokenizer (50257 vocab) which is
-    the most common baseline in academic language modeling research.
+    ~10-100x faster than transformers.GPT2TokenizerFast
+    Perfect for academic demos where speed matters.
     
     Example:
         ```python
-        from data import Tokenizer
+        from data.tokenizer_fast import FastTokenizer
         
-        tokenizer = Tokenizer()
+        tokenizer = FastTokenizer()
         
         # Encode text
         tokens = tokenizer.encode("Hello, world!")
         
         # Decode tokens
         text = tokenizer.decode(tokens)
-        
-        # Batch encode for training
-        batch = tokenizer(
-            ["First sequence", "Second sequence"],
-            max_length=512,
-            padding=True,
-            return_tensors="pt",
-        )
         ```
     """
     
@@ -47,7 +39,7 @@ class Tokenizer:
         truncation_side: str = "right",
     ):
         """
-        Initialize GPT-2 tokenizer.
+        Initialize fast tokenizer.
         
         Args:
             max_length: Default max sequence length
@@ -55,23 +47,23 @@ class Tokenizer:
             truncation_side: Side to truncate ("left" or "right")
         """
         try:
-            from transformers import GPT2TokenizerFast
+            import tiktoken
         except ImportError:
             raise ImportError(
-                "transformers package required. Install with: pip install transformers"
+                "tiktoken package required. Install with: pip install tiktoken"
             )
         
-        self._tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-        
-        # Configure tokenizer
-        self._tokenizer.padding_side = padding_side
-        self._tokenizer.truncation_side = truncation_side
-        
-        # GPT-2 doesn't have pad token by default - use EOS
-        self._tokenizer.pad_token = self._tokenizer.eos_token
-        self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
+        # Use GPT-2 encoding (same vocab as transformers GPT2)
+        self._tokenizer = tiktoken.get_encoding("gpt2")
         
         self.max_length = max_length
+        self.padding_side = padding_side
+        self.truncation_side = truncation_side
+        
+        # GPT-2 special tokens
+        self._eos_token_id = 50256
+        self._bos_token_id = 50256
+        self._pad_token_id = 50256
     
     @property
     def vocab_size(self) -> int:
@@ -81,17 +73,17 @@ class Tokenizer:
     @property
     def pad_token_id(self) -> int:
         """Padding token ID."""
-        return self._tokenizer.pad_token_id
+        return self._pad_token_id
     
     @property
     def eos_token_id(self) -> int:
         """End of sequence token ID."""
-        return self._tokenizer.eos_token_id
+        return self._eos_token_id
     
     @property
     def bos_token_id(self) -> int:
-        """Beginning of sequence token ID (same as EOS for GPT-2)."""
-        return self._tokenizer.bos_token_id
+        """Beginning of sequence token ID."""
+        return self._bos_token_id
     
     def encode(
         self,
@@ -107,17 +99,21 @@ class Tokenizer:
             text: Input text
             max_length: Maximum length (uses default if None)
             truncation: Whether to truncate
-            add_special_tokens: Add special tokens
+            add_special_tokens: Add special tokens (ignored for compatibility)
             
         Returns:
             List of token IDs
         """
-        return self._tokenizer.encode(
-            text,
-            max_length=max_length or self.max_length,
-            truncation=truncation,
-            add_special_tokens=add_special_tokens,
-        )
+        tokens = self._tokenizer.encode(text, allowed_special="all")
+        
+        if truncation and max_length:
+            max_len = max_length or self.max_length
+            if self.truncation_side == "right":
+                tokens = tokens[:max_len]
+            else:
+                tokens = tokens[-max_len:]
+        
+        return tokens
     
     def decode(
         self,
@@ -137,10 +133,7 @@ class Tokenizer:
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
         
-        return self._tokenizer.decode(
-            token_ids,
-            skip_special_tokens=skip_special_tokens,
-        )
+        return self._tokenizer.decode(token_ids)
     
     def __call__(
         self,
@@ -168,18 +161,44 @@ class Tokenizer:
         if isinstance(texts, str):
             texts = [texts]
         
-        return dict(self._tokenizer(
-            texts,
-            max_length=max_length or self.max_length,
-            padding=padding,
-            truncation=truncation,
-            return_tensors=return_tensors,
-            return_attention_mask=return_attention_mask,
-        ))
+        max_len = max_length or self.max_length
+        
+        # Encode all texts
+        all_ids = [self.encode(text, max_len, truncation) for text in texts]
+        
+        # Pad if needed
+        if padding:
+            if padding == "longest" or padding is True:
+                target_len = max(len(ids) for ids in all_ids)
+            else:  # "max_length"
+                target_len = max_len
+            
+            pad_id = self.pad_token_id
+            for i, ids in enumerate(all_ids):
+                pad_len = target_len - len(ids)
+                if pad_len > 0:
+                    if self.padding_side == "right":
+                        all_ids[i] = ids + [pad_id] * pad_len
+                    else:
+                        all_ids[i] = [pad_id] * pad_len + ids
+        
+        result = {}
+        
+        if return_tensors == "pt":
+            result["input_ids"] = torch.tensor(all_ids, dtype=torch.long)
+            if return_attention_mask:
+                result["attention_mask"] = (result["input_ids"] != self.pad_token_id).long()
+        else:
+            result["input_ids"] = all_ids
+            if return_attention_mask:
+                result["attention_mask"] = [[1 if id != self.pad_token_id else 0 for id in ids] for ids in all_ids]
+        
+        return result
     
     def __len__(self) -> int:
         """Return vocabulary size."""
         return self.vocab_size
     
     def __repr__(self) -> str:
-        return f"Tokenizer(gpt2, vocab_size={self.vocab_size}, max_length={self.max_length})"
+        return f"FastTokenizer(tiktoken-gpt2, vocab_size={self.vocab_size}, max_length={self.max_length})"
+

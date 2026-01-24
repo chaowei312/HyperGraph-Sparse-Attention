@@ -38,6 +38,8 @@ class SparseBlockConfig:
         norm_type: Type of normalization ('rmsnorm' or 'layernorm')
         norm_eps: Epsilon for normalization layers
         rope_base: Base frequency for RoPE
+        router_temperature: Gumbel-Softmax temperature (higher = more exploration)
+        entropy_weight: Weight for entropy regularization in aux loss
     """
     # Core dimensions
     dim: int = 512
@@ -65,6 +67,11 @@ class SparseBlockConfig:
     # Position encoding
     rope_base: float = 10000.0
     
+    # Router parameters (Gumbel-Softmax for preventing collapse)
+    router_temperature: float = 1.0
+    entropy_weight: float = 0.01
+    top_k: int = 1  # Number of timelines each token routes to
+    
     def __post_init__(self):
         """Compute derived values."""
         if self.head_dim is None:
@@ -75,7 +82,13 @@ class SparseBlockConfig:
             self.ffn_dim = int(self.ffn_multiplier * self.dim)
     
     @classmethod
-    def from_block_config(cls, config: BlockConfig, num_hyper_nodes: int = 4) -> "SparseBlockConfig":
+    def from_block_config(
+        cls, 
+        config: BlockConfig, 
+        num_hyper_nodes: int = 4,
+        router_temperature: float = 1.0,
+        entropy_weight: float = 0.01,
+    ) -> "SparseBlockConfig":
         """Create SparseBlockConfig from a standard BlockConfig."""
         return cls(
             dim=config.dim,
@@ -92,6 +105,8 @@ class SparseBlockConfig:
             norm_type=config.norm_type,
             norm_eps=config.norm_eps,
             rope_base=config.rope_base,
+            router_temperature=router_temperature,
+            entropy_weight=entropy_weight,
         )
 
 
@@ -135,7 +150,7 @@ class SparseDecoderBlock(nn.Module):
         self.attn_norm = norm_cls(config.dim, eps=config.norm_eps)
         self.ffn_norm = norm_cls(config.dim, eps=config.norm_eps)
         
-        # HyperGraph Sparse Attention
+        # HyperGraph Sparse Attention with Gumbel-Softmax routing
         self.attention = HyperGraphSparseAttention(
             embed_dim=config.dim,
             num_heads=config.num_heads,
@@ -145,6 +160,9 @@ class SparseDecoderBlock(nn.Module):
             bias=config.bias,
             max_seq_len=config.max_seq_len,
             rope_base=config.rope_base,
+            router_temperature=config.router_temperature,
+            entropy_weight=config.entropy_weight,
+            top_k=config.top_k,
         )
         
         # SwiGLU feed-forward network
@@ -165,7 +183,7 @@ class SparseDecoderBlock(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         position_offset: int = 0,
         node_counts: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Forward pass through the sparse decoder block.
         
@@ -179,11 +197,12 @@ class SparseDecoderBlock(nn.Module):
         Returns:
             output: Output tensor of shape (batch, seq_len, dim)
             node_counts: Updated node counts (None during training)
+            aux_loss: Load balance auxiliary loss (scalar)
         """
         # Self-attention with residual
         residual = x
         x = self.attn_norm(x)
-        x, updated_node_counts = self.attention(
+        x, updated_node_counts, aux_loss = self.attention(
             x,
             attn_mask=attn_mask,
             position_offset=position_offset,
@@ -199,4 +218,4 @@ class SparseDecoderBlock(nn.Module):
         x = self.dropout(x)
         x = residual + x
         
-        return x, updated_node_counts
+        return x, updated_node_counts, aux_loss

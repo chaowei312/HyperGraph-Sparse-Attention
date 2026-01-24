@@ -1,50 +1,33 @@
 """
 Dataset utilities for language model training.
 
-Standard benchmarks:
-    - WikiText-2: Small (2M tokens) - quick iteration
-    - WikiText-103: Medium (103M tokens) - standard benchmark
-    - OpenWebText: Large - full pretraining
+Supports:
+- NLTK Gutenberg: ~2.4M tokens (small, built-in)
+- WikiText-103: ~100M tokens (medium, via HuggingFace)
+- OpenWebText: ~8B tokens (large, via HuggingFace)
+- SlimPajama: ~627B tokens (very large, via HuggingFace)
 """
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict, Union
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 
 
 class TextDataset(Dataset):
     """
     Simple text dataset for causal language modeling.
-    
-    Tokenizes text and stores as single tensor (memory efficient).
-    
-    Args:
-        texts: List of text strings or single text
-        tokenizer: Tokenizer instance
-        max_length: Maximum sequence length
-        stride: Stride for sliding window (default: max_length, no overlap)
+    Stores pre-tokenized data as a single tensor.
     """
     
     def __init__(
         self,
-        texts: List[str],
-        tokenizer,
+        tokens: torch.Tensor,
         max_length: int = 512,
         stride: Optional[int] = None,
     ):
         self.max_length = max_length
         self.stride = stride or max_length
-        
-        # Tokenize all texts and concatenate
-        all_tokens = []
-        for text in texts:
-            tokens = tokenizer.encode(text, truncation=False, max_length=None)
-            all_tokens.extend(tokens)
-        
-        # Store as single contiguous tensor (much more memory efficient than list of lists)
-        self.tokens = torch.tensor(all_tokens, dtype=torch.long)
-        
-        # Number of valid sequences
+        self.tokens = tokens
         self.num_sequences = max(0, (len(self.tokens) - max_length) // self.stride)
     
     def __len__(self) -> int:
@@ -52,60 +35,173 @@ class TextDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         start = idx * self.stride
-        end = start + self.max_length + 1  # +1 for labels
+        end = start + self.max_length + 1
         tokens = self.tokens[start:end]
         return {"input_ids": tokens[:-1], "labels": tokens[1:]}
 
 
-def load_wikitext(
+def load_gutenberg(
     tokenizer,
     split: str = "train",
-    version: str = "wikitext-103-v1",
     max_length: int = 512,
     stride: Optional[int] = None,
 ) -> TextDataset:
     """
-    Load WikiText dataset.
+    Load NLTK Gutenberg corpus (classic literature).
+    
+    Includes works by:
+    - Shakespeare (Hamlet, Macbeth, Caesar)
+    - Milton (Paradise Lost)
+    - Austen, Melville, Whitman, etc.
     
     Args:
-        tokenizer: Tokenizer instance
-        split: "train", "validation", or "test"
-        version: "wikitext-2-v1" (small) or "wikitext-103-v1" (standard)
+        tokenizer: Tokenizer instance with encode() method
+        split: "train", "valid"/"validation", or "test"
         max_length: Sequence length
         stride: Sliding window stride
         
     Returns:
         TextDataset ready for DataLoader
-        
-    Example:
-        ```python
-        from data import Tokenizer, load_wikitext
-        
-        tokenizer = Tokenizer()
-        train_dataset = load_wikitext(tokenizer, split="train")
-        val_dataset = load_wikitext(tokenizer, split="validation")
-        
-        train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-        ```
     """
+    from nltk.corpus import gutenberg
+    
+    # Get all file IDs
+    file_ids = gutenberg.fileids()
+    
+    # Split: 70% train, 15% val, 15% test
+    n = len(file_ids)
+    train_ids = file_ids[:int(n * 0.7)]
+    val_ids = file_ids[int(n * 0.7):int(n * 0.85)]
+    test_ids = file_ids[int(n * 0.85):]
+    
+    # Map splits
+    split_map = {
+        "train": train_ids,
+        "validation": val_ids,
+        "valid": val_ids,
+        "val": val_ids,
+        "test": test_ids,
+    }
+    selected_ids = split_map.get(split, train_ids)
+    
+    # Concatenate all text from selected files
+    all_text = "\n\n".join([gutenberg.raw(fid) for fid in selected_ids])
+    
+    # Tokenize
+    tokens = tokenizer.encode(all_text, truncation=False, max_length=None)
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    
+    return TextDataset(tokens, max_length, stride)
+
+
+def load_wikitext(
+    tokenizer,
+    split: str = "train",
+    max_length: int = 512,
+    stride: Optional[int] = None,
+    variant: str = "103",  # "2" or "103"
+) -> TextDataset:
+    """
+    Load WikiText-2 or WikiText-103 dataset.
+    
+    First tries to load from local files, then falls back to HuggingFace.
+    
+    WikiText-2: ~2M tokens (similar to Gutenberg)
+    WikiText-103: ~100M tokens (50x larger)
+    
+    Args:
+        tokenizer: Tokenizer instance
+        split: "train", "validation", or "test"
+        max_length: Sequence length
+        stride: Sliding window stride
+        variant: "2" for WikiText-2, "103" for WikiText-103
+    """
+    import os
+    
+    # Try local files first
+    local_paths = [
+        f"/home/lopedg/project/data/data/wikitext-{variant}",
+        f"/home/lopedg/project/HyperGraph-Sparse-Attention/data/wikitext-{variant}",
+        f"./data/wikitext-{variant}",
+    ]
+    
+    split_file = f"{split}.txt" if split != "val" else "validation.txt"
+    if split == "val":
+        split_file = "validation.txt"
+    
+    for local_dir in local_paths:
+        file_path = os.path.join(local_dir, split_file)
+        if os.path.exists(file_path):
+            print(f"Loading WikiText-{variant} ({split}) from local file: {file_path}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                all_text = f.read()
+            
+            # Tokenize
+            print(f"  Tokenizing {len(all_text):,} characters...")
+            tokens = tokenizer.encode(all_text, truncation=False, max_length=None)
+            tokens = torch.tensor(tokens, dtype=torch.long)
+            print(f"  Generated {len(tokens):,} tokens")
+            
+            return TextDataset(tokens, max_length, stride)
+    
+    # Fall back to HuggingFace
     try:
         from datasets import load_dataset
     except ImportError:
-        raise ImportError(
-            "datasets package required. Install with: pip install datasets"
-        )
+        raise ImportError("Please install datasets: pip install datasets")
     
-    # Map split names
-    split_map = {"train": "train", "validation": "validation", "val": "validation", "test": "test"}
-    hf_split = split_map.get(split, split)
+    dataset_name = f"wikitext-{variant}-raw-v1"
+    print(f"Loading {dataset_name} ({split}) from HuggingFace...")
     
-    # Load from HuggingFace
-    dataset = load_dataset("wikitext", version, split=hf_split)
+    ds = load_dataset("wikitext", dataset_name, split=split, trust_remote_code=True)
     
-    # Filter empty lines and concatenate
-    texts = [item["text"] for item in dataset if item["text"].strip()]
+    # Concatenate all text
+    all_text = "\n".join([x["text"] for x in ds if x["text"].strip()])
     
-    return TextDataset(texts, tokenizer, max_length=max_length, stride=stride)
+    # Tokenize
+    tokens = tokenizer.encode(all_text, truncation=False, max_length=None)
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    
+    return TextDataset(tokens, max_length, stride)
+
+
+def load_local_wikitext(
+    tokenizer,
+    split: str = "train",
+    max_length: int = 512,
+    stride: Optional[int] = None,
+    data_dir: str = "/home/lopedg/project/data/data/wikitext-103-small",
+) -> TextDataset:
+    """
+    Load WikiText from local directory.
+    
+    Args:
+        tokenizer: Tokenizer instance
+        split: "train", "validation", or "test"
+        max_length: Sequence length
+        stride: Sliding window stride
+        data_dir: Directory containing train.txt, validation.txt, test.txt
+    """
+    import os
+    
+    split_file = f"{split}.txt"
+    file_path = os.path.join(data_dir, split_file)
+    
+    print(f"Loading {split} from local file: {file_path}")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        all_text = f.read()
+    
+    # Tokenize
+    print(f"  Tokenizing {len(all_text):,} characters...")
+    if hasattr(tokenizer, 'encode'):
+        tokens = tokenizer.encode(all_text)
+    else:
+        # tiktoken
+        tokens = tokenizer.encode(all_text)
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    print(f"  Generated {len(tokens):,} tokens")
+    
+    return TextDataset(tokens, max_length, stride)
 
 
 def load_openwebtext(
@@ -113,111 +209,229 @@ def load_openwebtext(
     split: str = "train",
     max_length: int = 512,
     stride: Optional[int] = None,
-    num_samples: Optional[int] = None,
+    max_samples: Optional[int] = None,
 ) -> TextDataset:
     """
-    Load OpenWebText dataset (GPT-2's training data recreation).
+    Load OpenWebText dataset from HuggingFace (~8B tokens).
     
-    Note: This is a large dataset (~38GB). Use num_samples to limit.
+    Note: This is a large dataset. Consider using max_samples for testing.
+    Full dataset requires significant disk space and download time.
     
     Args:
         tokenizer: Tokenizer instance
-        split: "train" (only split available)
+        split: "train" (only split available, we create val/test from it)
         max_length: Sequence length
         stride: Sliding window stride
-        num_samples: Limit number of samples (for quick testing)
-        
-    Returns:
-        TextDataset ready for DataLoader
+        max_samples: Limit number of documents to load
     """
     try:
         from datasets import load_dataset
     except ImportError:
-        raise ImportError(
-            "datasets package required. Install with: pip install datasets"
-        )
+        raise ImportError("Please install datasets: pip install datasets")
     
-    dataset = load_dataset("openwebtext", split=split)
+    print(f"Loading OpenWebText ({split})...")
     
-    if num_samples:
-        dataset = dataset.select(range(min(num_samples, len(dataset))))
+    # OpenWebText only has train split, we'll create our own splits
+    ds = load_dataset("openwebtext", split="train", trust_remote_code=True)
     
-    texts = [item["text"] for item in dataset if item["text"].strip()]
+    # Create splits: 98% train, 1% val, 1% test
+    n = len(ds)
+    if split == "train":
+        indices = range(0, int(n * 0.98))
+    elif split in ("validation", "valid", "val"):
+        indices = range(int(n * 0.98), int(n * 0.99))
+    else:  # test
+        indices = range(int(n * 0.99), n)
     
-    return TextDataset(texts, tokenizer, max_length=max_length, stride=stride)
+    # Limit samples if requested
+    if max_samples:
+        indices = list(indices)[:max_samples]
+    
+    # Concatenate text
+    all_text = "\n\n".join([ds[i]["text"] for i in indices])
+    
+    # Tokenize
+    tokens = tokenizer.encode(all_text, truncation=False, max_length=None)
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    
+    return TextDataset(tokens, max_length, stride)
+
+
+class StreamingTextDataset(IterableDataset):
+    """
+    Streaming dataset for very large corpora (SlimPajama, FineWeb).
+    Tokenizes on-the-fly to avoid memory issues.
+    """
+    
+    def __init__(
+        self,
+        dataset_name: str,
+        tokenizer,
+        max_length: int = 512,
+        split: str = "train",
+        subset: Optional[str] = None,
+    ):
+        self.dataset_name = dataset_name
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.split = split
+        self.subset = subset
+        self._buffer = []
+        
+    def __iter__(self):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError("Please install datasets: pip install datasets")
+        
+        # Load as streaming dataset
+        if self.subset:
+            ds = load_dataset(
+                self.dataset_name,
+                self.subset,
+                split=self.split,
+                streaming=True,
+                trust_remote_code=True,
+            )
+        else:
+            ds = load_dataset(
+                self.dataset_name,
+                split=self.split,
+                streaming=True,
+                trust_remote_code=True,
+            )
+        
+        buffer = []
+        for example in ds:
+            text = example.get("text", example.get("content", ""))
+            if not text.strip():
+                continue
+                
+            tokens = self.tokenizer.encode(text, truncation=False, max_length=None)
+            buffer.extend(tokens)
+            
+            # Yield sequences when buffer is large enough
+            while len(buffer) >= self.max_length + 1:
+                seq = buffer[:self.max_length + 1]
+                buffer = buffer[self.max_length:]
+                yield {
+                    "input_ids": torch.tensor(seq[:-1], dtype=torch.long),
+                    "labels": torch.tensor(seq[1:], dtype=torch.long),
+                }
 
 
 def create_dataloaders(
     tokenizer,
-    dataset_name: str = "wikitext-103",
+    dataset_name: str = "gutenberg",
     max_length: int = 512,
     batch_size: int = 8,
-    num_workers: int = 4,
+    num_workers: int = 0,
     stride: Optional[int] = None,
     max_train_samples: Optional[int] = None,
     max_eval_samples: Optional[int] = None,
+    num_proc: int = 1,  # Ignored (for API compatibility)
+    streaming: bool = False,  # Use streaming for very large datasets
 ) -> Dict[str, DataLoader]:
     """
-    Create train/val/test DataLoaders for a dataset.
+    Create train/val/test DataLoaders.
+    
+    Supported datasets:
+        - "gutenberg": NLTK classic literature (~2.4M tokens)
+        - "wikitext-2": Wikipedia articles (~2M tokens)
+        - "wikitext-103": Wikipedia articles (~100M tokens)
+        - "openwebtext": Web text (~8B tokens)
+        - "slimpajama": Large web corpus, streaming (~627B tokens)
     
     Args:
-        tokenizer: Tokenizer instance
-        dataset_name: "wikitext-2", "wikitext-103", or "openwebtext"
+        tokenizer: Tokenizer instance with encode() method
+        dataset_name: Dataset to use
         max_length: Sequence length
         batch_size: Batch size
         num_workers: DataLoader workers
         stride: Sliding window stride
+        max_train_samples: Limit training samples
+        max_eval_samples: Limit eval samples
+        num_proc: Ignored (for API compatibility)
+        streaming: Use streaming for very large datasets
         
     Returns:
         Dict with "train", "val", "test" DataLoaders
-        
-    Example:
-        ```python
-        from data import Tokenizer, create_dataloaders
-        
-        tokenizer = Tokenizer()
-        loaders = create_dataloaders(tokenizer, "wikitext-103", batch_size=8)
-        
-        for batch in loaders["train"]:
-            input_ids = batch["input_ids"]
-            labels = batch["labels"]
-            ...
-        ```
     """
-    # Map dataset names to versions
-    version_map = {
-        "wikitext-2": "wikitext-2-v1",
-        "wikitext-103": "wikitext-103-v1",
-        "wikitext-2-v1": "wikitext-2-v1",
-        "wikitext-103-v1": "wikitext-103-v1",
-    }
     
-    if dataset_name in version_map:
-        version = version_map[dataset_name]
-        train_ds = load_wikitext(tokenizer, "train", version, max_length, stride)
-        val_ds = load_wikitext(tokenizer, "validation", version, max_length, stride)
-        test_ds = load_wikitext(tokenizer, "test", version, max_length, stride)
+    if dataset_name == "gutenberg":
+        print(f"Loading NLTK Gutenberg corpus...")
+        train_ds = load_gutenberg(tokenizer, "train", max_length, stride)
+        val_ds = load_gutenberg(tokenizer, "validation", max_length, stride)
+        test_ds = load_gutenberg(tokenizer, "test", max_length, stride)
+        
+    elif dataset_name in ("wikitext-2", "wikitext2"):
+        train_ds = load_wikitext(tokenizer, "train", max_length, stride, "2")
+        val_ds = load_wikitext(tokenizer, "validation", max_length, stride, "2")
+        test_ds = load_wikitext(tokenizer, "test", max_length, stride, "2")
+        
+    elif dataset_name in ("wikitext-103", "wikitext103"):
+        train_ds = load_wikitext(tokenizer, "train", max_length, stride, "103")
+        val_ds = load_wikitext(tokenizer, "validation", max_length, stride, "103")
+        test_ds = load_wikitext(tokenizer, "test", max_length, stride, "103")
+    
+    elif dataset_name in ("wikitext-103-small", "wikitext103-small", "wiki103-small"):
+        # Small subset of WikiText-103 for toy experiments (~11M tokens)
+        data_dir = "/home/lopedg/project/data/data/wikitext-103-small"
+        train_ds = load_local_wikitext(tokenizer, "train", max_length, stride, data_dir)
+        val_ds = load_local_wikitext(tokenizer, "validation", max_length, stride, data_dir)
+        test_ds = load_local_wikitext(tokenizer, "test", max_length, stride, data_dir)
+        
     elif dataset_name == "openwebtext":
-        train_ds = load_openwebtext(tokenizer, "train", max_length, stride)
-        val_ds = None  # OpenWebText has no val/test split
-        test_ds = None
+        train_ds = load_openwebtext(tokenizer, "train", max_length, stride, max_train_samples)
+        val_ds = load_openwebtext(tokenizer, "validation", max_length, stride, max_eval_samples)
+        test_ds = load_openwebtext(tokenizer, "test", max_length, stride, max_eval_samples)
+        
+    elif dataset_name == "slimpajama" or streaming:
+        # Use streaming for very large datasets
+        print(f"Loading {dataset_name} in streaming mode...")
+        train_ds = StreamingTextDataset(
+            "cerebras/SlimPajama-627B",
+            tokenizer,
+            max_length,
+            split="train",
+        )
+        val_ds = StreamingTextDataset(
+            "cerebras/SlimPajama-627B",
+            tokenizer,
+            max_length,
+            split="validation",
+        )
+        # SlimPajama doesn't have test split, use validation
+        test_ds = val_ds
+        
+        # Streaming datasets don't support length
+        loaders = {
+            "train": DataLoader(train_ds, batch_size=batch_size, num_workers=num_workers),
+            "val": DataLoader(val_ds, batch_size=batch_size, num_workers=num_workers),
+            "test": DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers),
+        }
+        return loaders
+        
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+        raise ValueError(
+            f"Unknown dataset: {dataset_name}. "
+            f"Supported: gutenberg, wikitext-2, wikitext-103, openwebtext, slimpajama"
+        )
     
-    # Limit samples if requested (for quick testing)
-    if max_train_samples and len(train_ds) > max_train_samples:
+    # Print stats for non-streaming datasets
+    if hasattr(train_ds, 'tokens'):
+        print(f"  Train: {len(train_ds)} sequences ({len(train_ds.tokens):,} tokens)")
+        print(f"  Val:   {len(val_ds)} sequences ({len(val_ds.tokens):,} tokens)")
+        print(f"  Test:  {len(test_ds)} sequences ({len(test_ds.tokens):,} tokens)")
+    
+    # Limit samples if requested
+    if max_train_samples and hasattr(train_ds, '__len__') and len(train_ds) > max_train_samples:
         train_ds = torch.utils.data.Subset(train_ds, range(max_train_samples))
-    if max_eval_samples and val_ds and len(val_ds) > max_eval_samples:
-        val_ds = torch.utils.data.Subset(val_ds, range(max_eval_samples))
-    if max_eval_samples and test_ds and len(test_ds) > max_eval_samples:
-        test_ds = torch.utils.data.Subset(test_ds, range(max_eval_samples))
-    
-    # Windows multiprocessing can cause memory issues - use 0 workers by default
-    import sys
-    if sys.platform == "win32" and num_workers > 0:
-        import warnings
-        warnings.warn("Reducing num_workers to 0 on Windows to avoid memory issues")
-        num_workers = 0
+    if max_eval_samples:
+        if hasattr(val_ds, '__len__') and len(val_ds) > max_eval_samples:
+            val_ds = torch.utils.data.Subset(val_ds, range(max_eval_samples))
+        if hasattr(test_ds, '__len__') and len(test_ds) > max_eval_samples:
+            test_ds = torch.utils.data.Subset(test_ds, range(max_eval_samples))
     
     loaders = {
         "train": DataLoader(
@@ -225,27 +439,22 @@ def create_dataloaders(
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=False,  # Avoid pinned memory overhead
+            pin_memory=False,
         ),
-    }
-    
-    if val_ds:
-        loaders["val"] = DataLoader(
+        "val": DataLoader(
             val_ds,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
-        )
-    
-    if test_ds:
-        loaders["test"] = DataLoader(
+        ),
+        "test": DataLoader(
             test_ds,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
-        )
+        ),
+    }
     
     return loaders
-

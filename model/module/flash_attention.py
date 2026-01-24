@@ -1,14 +1,21 @@
 """
-Flash Attention implementation using PyTorch's native scaled_dot_product_attention.
+Flash Attention implementation using xformers memory_efficient_attention.
 
-Flash Attention is an IO-aware exact attention algorithm that uses tiling to reduce
-memory reads/writes between GPU high bandwidth memory (HBM) and GPU on-chip SRAM.
+For fair comparison with HyperGraph sparse attention, both use xformers backend.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+
+# Import xformers for fair comparison with HyperGraph attention
+try:
+    import xformers.ops as xops
+    from xformers.ops import LowerTriangularMask
+    XFORMERS_AVAILABLE = True
+except ImportError:
+    XFORMERS_AVAILABLE = False
 
 
 class FlashAttention(nn.Module):
@@ -59,12 +66,11 @@ class FlashAttention(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass for Flash Attention.
+        Forward pass for Flash Attention using xformers.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim)
-            attn_mask: Optional attention mask of shape (batch_size, seq_len) or
-                      (batch_size, 1, seq_len, seq_len)
+            attn_mask: Optional attention mask (ignored, uses causal mask)
         
         Returns:
             Output tensor of shape (batch_size, seq_len, embed_dim)
@@ -74,22 +80,27 @@ class FlashAttention(nn.Module):
         # Compute QKV projections
         qkv = self.qkv_proj(x)
         qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, H, S, D)
-        q, k, v = qkv.unbind(0)  # Each: (B, H, S, D)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]  # Each: (B, S, H, D)
         
-        # Use PyTorch's scaled_dot_product_attention (Flash Attention under the hood)
+        # Use xformers memory_efficient_attention for fair comparison
+        if XFORMERS_AVAILABLE:
+            attn_bias = LowerTriangularMask() if self.causal else None
+            out = xops.memory_efficient_attention(q, k, v, attn_bias=attn_bias)
+        else:
+            # Fallback to PyTorch SDPA
+            q = q.transpose(1, 2)  # (B, H, S, D)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
         dropout_p = self.dropout if self.training else 0.0
-        
         out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=self.causal if attn_mask is None else False,
+            is_causal=self.causal,
             scale=self.scale,
         )
+        out = out.transpose(1, 2)  # (B, S, H, D)
         
         # Reshape and project output
-        out = out.transpose(1, 2).contiguous()  # (B, S, H, D)
         out = out.reshape(batch_size, seq_len, self.embed_dim)
         out = self.out_proj(out)
         
@@ -229,7 +240,7 @@ class FlashMultiHeadAttention(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass supporting both self and cross attention.
+        Forward pass using xformers for fair comparison.
         
         Args:
             x: Query tensor of shape (batch_size, seq_len, embed_dim)
@@ -244,38 +255,45 @@ class FlashMultiHeadAttention(nn.Module):
             
         batch_size, tgt_len, _ = x.shape
         src_len = context.shape[1]
+        is_self_attn = context is x
         
         # Project Q, K, V
         q = self.q_proj(x)
         k = self.k_proj(context)
         v = self.v_proj(context)
         
-        # Reshape for attention
-        q = q.view(batch_size, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, src_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, src_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        # Reshape for xformers: (B, S, H, D)
+        q = q.view(batch_size, tgt_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, src_len, self.num_kv_heads, self.head_dim)
+        v = v.view(batch_size, src_len, self.num_kv_heads, self.head_dim)
         
         # Expand KV for Grouped Query Attention
         if self.num_kv_groups > 1:
-            k = k.unsqueeze(2).expand(-1, -1, self.num_kv_groups, -1, -1)
-            k = k.reshape(batch_size, self.num_heads, src_len, self.head_dim)
-            v = v.unsqueeze(2).expand(-1, -1, self.num_kv_groups, -1, -1)
-            v = v.reshape(batch_size, self.num_heads, src_len, self.head_dim)
+            k = k.unsqueeze(3).expand(-1, -1, -1, self.num_kv_groups, -1)
+            k = k.reshape(batch_size, src_len, self.num_heads, self.head_dim)
+            v = v.unsqueeze(3).expand(-1, -1, -1, self.num_kv_groups, -1)
+            v = v.reshape(batch_size, src_len, self.num_heads, self.head_dim)
         
-        # Flash attention
+        # Use xformers for fair comparison
+        if XFORMERS_AVAILABLE:
+            attn_bias = LowerTriangularMask() if (self.causal and is_self_attn) else None
+            out = xops.memory_efficient_attention(q, k, v, attn_bias=attn_bias)
+        else:
+            # Fallback to PyTorch SDPA
+            q = q.transpose(1, 2)  # (B, H, S, D)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
         dropout_p = self.dropout if self.training else 0.0
-        is_causal = self.causal and (context is x) and (attn_mask is None)
-        
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=dropout_p,
-            is_causal=is_causal,
+            is_causal=self.causal and is_self_attn,
             scale=self.scale,
         )
+        out = out.transpose(1, 2)  # (B, S, H, D)
         
         # Reshape and project output
-        out = out.transpose(1, 2).contiguous()
         out = out.reshape(batch_size, tgt_len, self.embed_dim)
         out = self.out_proj(out)
         

@@ -1,0 +1,42 @@
+{
+  "dim": 256,
+  "num_heads": 4,
+  "num_hyper_nodes": 4,
+  "top_k": 4,
+  "moh_num_kv_groups": 6,
+  "moh_active_kv_groups": 4,
+  "moh_q_heads_per_kv": 2,
+  "moh_num_heads": 6,
+  "moh_active_heads": 4,
+  "num_layers": 14,
+  "vocab_size": 50257,
+  "max_seq_len": 1024,
+  "pattern": "FSSFSSFSSFSSFF",
+  "batch_size": 1,
+  "grad_accum": 16,
+  "num_steps": 10000,
+  "lr": 0.0003,
+  "weight_decay": 0.1,
+  "warmup_steps": 1000,
+  "min_lr_ratio": 0.1,
+  "aux_loss_weight": 0.01,
+  "lr_scale_baseline": 1.0,
+  "lr_scale_hypergraph": 1.0,
+  "lr_scale_moh": 0.8,
+  "patience": 5,
+  "min_delta": 0.001,
+  "log_every": 100,
+  "eval_every": 500,
+  "dataset": "wikitext-103-small",
+  "seq_len": 512,
+  "output_dir": "results/test_topk_full",
+  "save_checkpoint": true,
+  "models": [
+    "baseline",
+    "hypergraph"
+  ],
+  "gpus": [
+    0,
+    1
+  ]
+}

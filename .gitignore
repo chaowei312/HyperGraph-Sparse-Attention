@@ -1,16 +1,56 @@
+# Python
 .venv/
 __pycache__/
 *.py[cod]
 *.pkl
+
+# Checkpoints and model weights (large files)
 *.pt
 *.pth
 *.ckpt
-*.log
+checkpoints/
+
+# Data (large files, downloaded separately)
+data/data/
+data/*.zip
+data/*.txt
+
+# IDE and OS
 .ipynb_checkpoints/
 .pytest_cache/
-checkpoints/
-dist/
-build/
 .DS_Store
 Thumbs.db
 
+# Build
+dist/
+build/
+
+# Logs (keep only important ones)
+*.log
+
+# Legacy experiment results (remove these folders)
+results/parallel_*/
+results/placement_comparison/
+results/placement_comparison_v2/
+results/topk_routing_fix/
+results/topk_routing_fix_v2/
+results/moh_wiki103small/
+results/moh_wiki103small_v2/
+results/moh_baseline_test/
+results/benchmark_baseline_vs_hypergraph/
+results/benchmark_comparison/
+results/arch_comparison/
+results/wikitext103_buggy_backup/
+results/wikitext103_full/
+results/full_comparison/
+
+# Keep recent experiments (not ignored):
+# - results/arch_comparison_768/
+# - results/benchmark_256dim/
+# - results/benchmark_40k_same_lr/
+# - results/benchmark_gqa_moh/
+# - results/benchmark_20k/
+# - results/test_topk2/
+# - results/test_topk_full/
+# - results/test_parallel/
+# - results/figures/

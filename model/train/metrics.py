@@ -182,8 +182,8 @@ def compute_perplexity(
         input_ids = batch["input_ids"].to(device)
         labels = batch.get("labels", input_ids[:, 1:]).to(device)
         
-        # Forward pass
-        logits = model(input_ids)
+        # Forward pass (returns logits and aux_loss)
+        logits, _ = model(input_ids)
         
         # Shift for next-token prediction
         shift_logits = logits[:, :-1, :].contiguous()

@@ -43,11 +43,19 @@ from .block import (
 from .hypergraph_attention import (
     HyperGraphRoPE,
     HyperGraphSparseAttention,
+    XFORMERS_AVAILABLE,
 )
 
 from .sparse_block import (
     SparseBlockConfig,
     SparseDecoderBlock,
+)
+
+from .mixture_of_heads_attention import (
+    MoHRoPE,
+    MixtureOfHeadsAttention,
+    GQAMixtureOfHeadsAttention,
+    MoHSparseAttentionSimple,
 )
 
 
@@ -72,10 +80,16 @@ __all__ = [
     "BlockConfig",
     "DecoderBlock",
     "RMSNorm",
-    # HyperGraph Sparse Attention
+    # HyperGraph Sparse Attention (with Top-K routing + capacity limits)
     "HyperGraphRoPE",
     "HyperGraphSparseAttention",
+    "XFORMERS_AVAILABLE",
     "SparseBlockConfig",
     "SparseDecoderBlock",
+    # Mixture of Heads (MoH) - Alternative architecture
+    "MoHRoPE",
+    "MixtureOfHeadsAttention",
+    "GQAMixtureOfHeadsAttention",
+    "MoHSparseAttentionSimple",
 ]
 

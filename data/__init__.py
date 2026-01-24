@@ -2,15 +2,15 @@
 Data utilities for Sparse Attention experiments.
 
 Provides:
-    - Tokenizer: GPT-2 tokenizer (standard for research)
-    - Datasets: WikiText-2/103, OpenWebText
+    - FastTokenizer: GPT-2 tokenizer using tiktoken (recommended)
+    - Datasets: Gutenberg, WikiText-2/103, OpenWebText, SlimPajama
     
 Example:
     ```python
-    from data import Tokenizer, create_dataloaders
+    from data import FastTokenizer, create_dataloaders
     
-    tokenizer = Tokenizer()
-    loaders = create_dataloaders(tokenizer, "wikitext-103", batch_size=8)
+    tokenizer = FastTokenizer()
+    loaders = create_dataloaders(tokenizer, "wikitext-103-small", batch_size=1)
     
     for batch in loaders["train"]:
         input_ids = batch["input_ids"]  # (batch, seq_len)
@@ -18,17 +18,21 @@ Example:
     ```
 """
 
-from .tokenizer import Tokenizer
+from .fast_tokenizer import FastTokenizer
 from .dataset import (
     TextDataset,
+    StreamingTextDataset,
+    load_gutenberg,
     load_wikitext,
     load_openwebtext,
     create_dataloaders,
 )
 
 __all__ = [
-    "Tokenizer",
+    "FastTokenizer",
     "TextDataset",
+    "StreamingTextDataset",
+    "load_gutenberg",
     "load_wikitext",
     "load_openwebtext",
     "create_dataloaders",

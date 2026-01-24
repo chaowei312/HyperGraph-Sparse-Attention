@@ -302,19 +302,23 @@ class Trainer:
             attn_mask = attn_mask.to(self.device)
         
         with torch.amp.autocast(self.device.type, dtype=self.autocast_dtype, enabled=self.use_amp):
-            # Forward pass
-            logits = self.model(input_ids, attn_mask=attn_mask)
+            # Forward pass (returns logits and aux_loss for load balancing)
+            logits, aux_loss = self.model(input_ids, attn_mask=attn_mask)
             
             # Shift for next-token prediction
             shift_logits = logits[:, :-1, :].contiguous()
             shift_labels = labels[:, 1:].contiguous()
             
             # Cross-entropy loss
-            loss = F.cross_entropy(
+            ce_loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
                 ignore_index=-100,
             )
+            
+            # Add load balance auxiliary loss (weight from config, default 0.01)
+            aux_weight = getattr(self.config, 'aux_loss_weight', 0.01)
+            loss = ce_loss + aux_weight * aux_loss
         
         return loss
     
@@ -333,7 +337,7 @@ class Trainer:
                 attn_mask = attn_mask.to(self.device)
             
             with torch.amp.autocast(self.device.type, dtype=self.autocast_dtype, enabled=self.use_amp):
-                logits = self.model(input_ids, attn_mask=attn_mask)
+                logits, _ = self.model(input_ids, attn_mask=attn_mask)
                 
                 shift_logits = logits[:, :-1, :].contiguous()
                 shift_labels = labels[:, 1:].contiguous()

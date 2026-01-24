@@ -1,0 +1,50 @@
+{
+  "model_type": "baseline",
+  "pattern": "FFFFFFFFFFFF",
+  "num_params": 22303232,
+  "best_val_loss": 5.346434860229492,
+  "test_loss": 5.383571827628396,
+  "test_ppl": 217.7988276139683,
+  "final_step": 20000,
+  "config": {
+    "dim": 256,
+    "num_heads": 4,
+    "num_hyper_nodes": 4,
+    "top_k": 2,
+    "moh_num_heads": 8,
+    "moh_active_heads": 4,
+    "num_layers": 12,
+    "vocab_size": 50257,
+    "max_seq_len": 1024,
+    "pattern": "FFSSFSSFSSFF",
+    "batch_size": 1,
+    "grad_accum": 16,
+    "num_steps": 20000,
+    "lr": 0.0003,
+    "weight_decay": 0.1,
+    "warmup_steps": 2000,
+    "min_lr_ratio": 0.1,
+    "aux_loss_weight": 0.01,
+    "lr_scale_baseline": 1.0,
+    "lr_scale_hypergraph": 0.72,
+    "lr_scale_moh": 0.8,
+    "patience": 10,
+    "min_delta": 0.001,
+    "log_every": 100,
+    "eval_every": 500,
+    "dataset": "wikitext-103-small",
+    "seq_len": 1024,
+    "output_dir": "results/benchmark_256dim",
+    "save_checkpoint": true,
+    "models": [
+      "baseline",
+      "hypergraph",
+      "moh"
+    ],
+    "gpus": [
+      0,
+      1,
+      2
+    ]
+  }
+}
