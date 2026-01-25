@@ -31,8 +31,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+from functools import lru_cache
 
 from .rope import rotate_half
+
+# Check for torch.compile availability (PyTorch 2.0+)
+_TORCH_COMPILE_AVAILABLE = hasattr(torch, 'compile')
 
 # Import xformers (required)
 try:
@@ -144,6 +148,7 @@ class HyperGraphSparseAttention(nn.Module):
         rope_base: float = 10000.0,
         router_temperature: float = 1.0,
         entropy_weight: float = 0.01,
+        use_compile: bool = False,  # torch.compile (not beneficial with dynamic seq_len)
     ):
         super().__init__()
         
@@ -189,6 +194,15 @@ class HyperGraphSparseAttention(nn.Module):
         
         # Dropout
         self.attn_dropout = nn.Dropout(dropout)
+        
+        # torch.compile for index building (optional, PyTorch 2.0+)
+        self._use_compile = use_compile and _TORCH_COMPILE_AVAILABLE
+        if self._use_compile:
+            self._build_indices_compiled = torch.compile(
+                self._build_indices_and_positions,
+                mode="reduce-overhead",
+                fullgraph=False,  # Allow graph breaks for dynamic shapes
+            )
     
     def _top_k_gumbel_routing(
         self, 
@@ -319,6 +333,65 @@ class HyperGraphSparseAttention(nn.Module):
         
         return node_logits
     
+    def _build_indices_and_positions(
+        self,
+        node_assign_2d: torch.Tensor,
+        node_counts_flat: torch.Tensor,
+        seq_len: int,
+        H: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Build gather indices and compute positions for RoPE (compilable).
+        
+        This method contains pure tensor ops suitable for torch.compile.
+        
+        Args:
+            node_assign_2d: Node assignments (H, N)
+            node_counts_flat: Previous node counts (H, K)
+            seq_len: Sequence length N
+            H: Number of heads
+            
+        Returns:
+            gather_idx: Indices for gathering Q/K/V (H * N,)
+            positions: RoPE positions for each token (H * N,)
+            sorted_nodes: Node IDs in sorted order (H, N)
+        """
+        device = node_assign_2d.device
+        
+        # === ARGSORT-BASED GROUPING ===
+        base_indices = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(H, -1)
+        sort_keys = node_assign_2d * seq_len + base_indices
+        sorted_indices = sort_keys.argsort(dim=1)
+        
+        # Add head offsets
+        head_offsets = torch.arange(H, device=device, dtype=torch.long).unsqueeze(1) * seq_len
+        gather_idx = (sorted_indices + head_offsets).flatten()
+        
+        # Get sorted node assignments
+        sorted_nodes = torch.gather(node_assign_2d, 1, sorted_indices)
+        
+        # === POSITION COMPUTATION (unique_consecutive) ===
+        sorted_nodes_flat = sorted_nodes.flatten()
+        _, inverse, counts_per_segment = torch.unique_consecutive(
+            sorted_nodes_flat, return_inverse=True, return_counts=True
+        )
+        
+        # Segment starts
+        segment_ends = counts_per_segment.cumsum(0)
+        segment_starts = torch.zeros_like(segment_ends)
+        segment_starts[1:] = segment_ends[:-1]
+        
+        # Position within segment
+        token_segment_starts = segment_starts[inverse]
+        global_indices = torch.arange(H * seq_len, device=device, dtype=torch.long)
+        positions_in_group_flat = global_indices - token_segment_starts
+        
+        # Add KV cache offsets
+        offsets = torch.gather(node_counts_flat, 1, sorted_nodes).flatten()
+        positions = positions_in_group_flat + offsets
+        
+        return gather_idx, positions, sorted_nodes
+    
     def _compute_load_balance_loss(
         self,
         node_probs: torch.Tensor,
@@ -444,103 +517,52 @@ class HyperGraphSparseAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
-        # === VECTORIZED INDEX BUILDING (no Python loops!) ===
-        # Build gather indices for all (head, node) combinations in parallel
-        # Order: [head0_node0, head0_node1, ..., head0_nodeK-1, head1_node0, ...]
-        
-        # Create (H, N) node assignments and (H, K, N) masks in one shot
-        # node_assignments: (1, H, N) -> we work with (H, N)
+        # === BUILD INDICES AND POSITIONS (optionally compiled) ===
         node_assign_2d = node_assignments[0]  # (H, N)
+        node_counts_flat = node_counts[0]  # (H, K)
         
-        # Create all H×K masks at once: (H, K, N)
-        node_range = torch.arange(K, device=device).view(1, K, 1)  # (1, K, 1)
-        node_assign_expanded = node_assign_2d.unsqueeze(1)  # (H, 1, N)
-        all_masks = (node_assign_expanded == node_range)  # (H, K, N) - broadcast
+        # Use compiled version if available
+        if self._use_compile:
+            gather_idx, positions, sorted_nodes = self._build_indices_compiled(
+                node_assign_2d, node_counts_flat, seq_len, H
+            )
+        else:
+            gather_idx, positions, sorted_nodes = self._build_indices_and_positions(
+                node_assign_2d, node_counts_flat, seq_len, H
+            )
         
-        # Count tokens per (head, node) - vectorized
-        counts = all_masks.sum(dim=2)  # (H, K)
-        all_seqlens = counts.flatten().tolist()  # Need list for xformers
-        all_seqlens = [c for c in all_seqlens if c > 0]  # Filter empty blocks
+        # Clamp positions for RoPE lookup
+        positions = positions.clamp(0, self.rope.max_seq_len - 1)
         
-        # Build gather indices using argsort trick (fully vectorized)
-        # For each head, sort token indices by their node assignment
-        # This groups tokens by node automatically
+        # Compute seqlens for xformers (requires CPU sync, can't be compiled)
+        sorted_nodes_flat = sorted_nodes.flatten()
+        _, _, counts_per_segment = torch.unique_consecutive(
+            sorted_nodes_flat, return_inverse=True, return_counts=True
+        )
+        all_seqlens = counts_per_segment[counts_per_segment > 0].tolist()
         
-        # Create base indices: (H, N) where each row is [0, 1, 2, ..., N-1]
-        base_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(H, -1)
-        
-        # Create sort keys: node_id * N + position (ensures stable sort within nodes)
-        sort_keys = node_assign_2d * seq_len + base_indices  # (H, N)
-        
-        # Argsort gives us indices that group tokens by node
-        sorted_indices = sort_keys.argsort(dim=1)  # (H, N)
-        
-        # Add head offsets: head h's indices should be offset by h * seq_len
-        head_offsets = torch.arange(H, device=device).unsqueeze(1) * seq_len  # (H, 1)
-        gather_indices_2d = sorted_indices + head_offsets  # (H, N)
-        
-        # Flatten to 1D gather index
-        gather_idx = gather_indices_2d.flatten()  # (H * N,)
-        
-        # Flatten Q, K, V: (batch, heads, seq, d) -> (batch, heads * seq, d)
+        # Flatten Q, K, V and gather in block order
         q_flat = q.reshape(batch, H * seq_len, self.head_dim)
         k_flat = k.reshape(batch, H * seq_len, self.head_dim)
         v_flat = v.reshape(batch, H * seq_len, self.head_dim)
         
-        # Gather in block order
         q_ordered = q_flat[:, gather_idx, :]
         k_ordered = k_flat[:, gather_idx, :]
         v_ordered = v_flat[:, gather_idx, :]
         
-        # === COMPUTE PER-NODE POSITIONS (fully vectorized) ===
-        # Sequential positions 0, 1, 2, ... within each block
-        # Add offset from previous forward passes for KV cache continuation
+        # === APPLY ROPE (optimized) ===
+        # cos/sin: (H*N, head_dim), q/k_ordered: (1, H*N, head_dim)
+        cos = self.rope.cos_cached[positions].unsqueeze(0)  # (1, H*N, head_dim)
+        sin = self.rope.sin_cached[positions].unsqueeze(0)  # (1, H*N, head_dim)
         
-        # Get the sorted node assignments (H, N) - nodes in sorted order
-        sorted_nodes = torch.gather(node_assign_2d, 1, sorted_indices)  # (H, N)
+        # Pre-compute rotated halves BEFORE in-place ops (critical!)
+        q_rot = rotate_half(q_ordered)
+        k_rot = rotate_half(k_ordered)
         
-        # Compute position within each node group using cumsum trick
-        # Mark where node changes (boundaries)
-        node_changes = torch.ones(H, seq_len, device=device, dtype=torch.long)
-        node_changes[:, 1:] = (sorted_nodes[:, 1:] != sorted_nodes[:, :-1]).long()
-        
-        # Group IDs: cumsum of boundaries
-        group_ids = node_changes.cumsum(dim=1)  # (H, N)
-        
-        # Position within group = index - first_index_of_group
-        # Use segment cumsum: cumsum - cumsum_at_group_start
-        raw_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(H, -1)
-        
-        # For each group, find its starting index
-        # Trick: use scatter to mark group starts, then gather
-        num_groups = group_ids.max().item() + 1
-        group_starts = torch.zeros(H, num_groups + 1, device=device, dtype=torch.long)
-        
-        # Scatter first occurrence of each group_id
-        # We want the minimum index for each group
-        inverse_indices = seq_len - 1 - raw_indices  # Reverse so scatter takes minimum
-        group_starts.scatter_(1, group_ids, inverse_indices)
-        group_starts = seq_len - 1 - group_starts  # Reverse back
-        
-        # Gather the start position for each token's group
-        token_group_starts = torch.gather(group_starts, 1, group_ids)  # (H, N)
-        
-        # Position within group
-        positions_in_group = raw_indices - token_group_starts  # (H, N)
-        
-        # Add node_counts offset for KV cache continuation
-        node_counts_flat = node_counts[0]  # (H, K)
-        offsets = torch.gather(node_counts_flat, 1, sorted_nodes)  # (H, N)
-        
-        positions = (positions_in_group + offsets).flatten()  # (H * N,)
-        positions = positions.clamp(0, self.rope.max_seq_len - 1)
-        
-        # === APPLY ROPE ===
-        cos = self.rope.cos_cached[positions]
-        sin = self.rope.sin_cached[positions]
-        
-        q_ordered = (q_ordered * cos.unsqueeze(0)) + (rotate_half(q_ordered) * sin.unsqueeze(0))
-        k_ordered = (k_ordered * cos.unsqueeze(0)) + (rotate_half(k_ordered) * sin.unsqueeze(0))
+        # Apply RoPE in-place: x = x * cos + rotate_half(x) * sin
+        # This avoids allocating intermediate tensors
+        q_ordered.mul_(cos).add_(q_rot * sin)
+        k_ordered.mul_(cos).add_(k_rot * sin)
         
         # === XFORMERS BLOCK-DIAGONAL CAUSAL ATTENTION ===
         # Add head dimension for xformers: (batch, total, 1, d)
