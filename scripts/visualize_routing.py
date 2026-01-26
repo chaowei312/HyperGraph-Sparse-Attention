@@ -348,19 +348,8 @@ def main():
     )
     
     # Generate combined visualization for report
-    print("\nGenerating combined visualizations...")
+    print("\nGenerating visualizations...")
     visualize_combined(model, text, "results/figures")
-    
-    # Also generate individual visualizations
-    for layer_idx in [0, 3]:
-        for head_idx in [0, 5]:
-            print(f"\nExtracting routing for layer {layer_idx}, head {head_idx}...")
-            tokens, routing_info, actual_layer = get_routing_assignments(
-                model, text, layer_idx=layer_idx, head_idx=head_idx
-            )
-            
-            save_path = f"results/figures/routing_L{actual_layer}_H{head_idx}.png"
-            visualize_routing(tokens, routing_info, actual_layer, head_idx, save_path)
     
     print("\n" + "=" * 60)
     print("Done! Generated routing visualizations.")
