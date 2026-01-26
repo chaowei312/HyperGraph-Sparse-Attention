@@ -200,41 +200,97 @@ def visualize_routing(tokens, routing_info, layer_idx, head_idx, save_path="rout
     return save_path
 
 def visualize_combined(model, text: str, output_dir: str = "results/figures"):
-    """Generate combined routing visualization with multiple heads."""
+    """Generate combined routing visualization with token boxes across multiple heads."""
     import os
     os.makedirs(output_dir, exist_ok=True)
     
-    # Get routing for multiple heads
-    heads_to_show = [0, 3, 6, 9]  # Show 4 different heads
-    layer_idx = 0  # First sparse layer
+    # Timeline colors (matching the style shown)
+    timeline_colors = {
+        0: '#FF6B6B',  # Red/Coral - Timeline 0
+        1: '#9B59B6',  # Purple - Timeline 1
+        2: '#2ECC71',  # Green - Timeline 2
+        3: '#3498DB',  # Blue - Timeline 3
+        4: '#F39C12',  # Orange - Timeline 4
+        5: '#95A5A6',  # Gray - Timeline 5
+    }
     
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    axes = axes.flatten()
+    # Layer/head combinations to show
+    configs = [
+        (0, 0, "Layer 1, Head 0"),
+        (0, 5, "Layer 1, Head 5"),
+        (3, 0, "Layer 5, Head 0"),
+        (3, 5, "Layer 5, Head 5"),
+    ]
     
-    for ax_idx, head_idx in enumerate(heads_to_show):
-        tokens, routing_info, actual_layer = get_routing_assignments(
+    # Get tokens once
+    tokens, _, _ = get_routing_assignments(model, text, layer_idx=0, head_idx=0)
+    seq_len = len(tokens)
+    K = 6  # Number of timelines
+    
+    # Create figure
+    fig_height = len(configs) * 2.5 + 1.5  # Space for each row + legend
+    fig, axes = plt.subplots(len(configs), 1, figsize=(max(16, seq_len * 1.2), fig_height))
+    if len(configs) == 1:
+        axes = [axes]
+    
+    fig.suptitle(f'Text: "{text}"', fontsize=14, fontweight='bold', y=0.98)
+    
+    for ax_idx, (layer_idx, head_idx, title) in enumerate(configs):
+        ax = axes[ax_idx]
+        
+        # Get routing for this layer/head
+        _, routing_info, actual_layer = get_routing_assignments(
             model, text, layer_idx=layer_idx, head_idx=head_idx
         )
         
-        K = routing_info['probs'].shape[1]
-        probs = routing_info['probs'].numpy()
+        # Get primary timeline assignment for each token
+        primary_timelines = routing_info['top_k_indices'][:, 0].numpy()
         
-        # Heatmap
-        im = axes[ax_idx].imshow(probs.T, aspect='auto', cmap='YlOrRd', vmin=0, vmax=1)
-        axes[ax_idx].set_xlabel("Token Position")
-        axes[ax_idx].set_ylabel("Timeline")
-        axes[ax_idx].set_yticks(range(K))
-        axes[ax_idx].set_yticklabels([f"T{i}" for i in range(K)])
-        axes[ax_idx].set_title(f"Head {head_idx} (Layer {actual_layer})")
+        # Set up axis
+        ax.set_xlim(-0.5, seq_len - 0.5)
+        ax.set_ylim(-0.3, 1.3)
+        ax.set_title(title, fontsize=12, fontweight='bold', loc='left', pad=10)
+        ax.axis('off')
         
-        # Token labels
-        if len(tokens) <= 20:
-            axes[ax_idx].set_xticks(range(len(tokens)))
-            axes[ax_idx].set_xticklabels([t.replace('\n', '\\n')[:6] for t in tokens], 
-                                         rotation=45, ha='right', fontsize=7)
+        # Draw token boxes
+        box_width = 0.85
+        box_height = 1.0
+        
+        for i, token in enumerate(tokens):
+            timeline = primary_timelines[i]
+            color = timeline_colors.get(timeline, '#CCCCCC')
+            
+            # Draw box
+            rect = mpatches.FancyBboxPatch(
+                (i - box_width/2, 0), box_width, box_height,
+                boxstyle="round,pad=0.02,rounding_size=0.1",
+                facecolor=color,
+                edgecolor='#2C3E50',
+                linewidth=1.5
+            )
+            ax.add_patch(rect)
+            
+            # Token text (white for readability)
+            display_token = token.replace('\n', '\\n').strip()
+            if len(display_token) > 8:
+                display_token = display_token[:7] + '..'
+            ax.text(i, 0.55, display_token, ha='center', va='center',
+                   fontsize=9, fontweight='bold', color='white')
+            
+            # Timeline label below
+            ax.text(i, 0.15, f'T{timeline}', ha='center', va='center',
+                   fontsize=8, color='white', alpha=0.9)
     
-    plt.suptitle(f"Timeline Routing Across Heads\nText: \"{text[:50]}...\"", fontsize=14)
+    # Add legend at bottom
+    legend_patches = [mpatches.Patch(facecolor=timeline_colors[i], edgecolor='#2C3E50',
+                                      label=f'Timeline {i}', linewidth=1)
+                      for i in range(K)]
+    fig.legend(handles=legend_patches, loc='lower center', ncol=K, 
+               fontsize=10, frameon=True, fancybox=True,
+               bbox_to_anchor=(0.5, 0.02))
+    
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.1, top=0.93, hspace=0.4)
     
     # Save combined
     combined_path = f"{output_dir}/routing_combined.png"
