@@ -199,9 +199,83 @@ def visualize_routing(tokens, routing_info, layer_idx, head_idx, save_path="rout
     print(f"Saved visualization to {save_path}")
     return save_path
 
+def visualize_combined(model, text: str, output_dir: str = "results/figures"):
+    """Generate combined routing visualization with multiple heads."""
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get routing for multiple heads
+    heads_to_show = [0, 3, 6, 9]  # Show 4 different heads
+    layer_idx = 0  # First sparse layer
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+    
+    for ax_idx, head_idx in enumerate(heads_to_show):
+        tokens, routing_info, actual_layer = get_routing_assignments(
+            model, text, layer_idx=layer_idx, head_idx=head_idx
+        )
+        
+        K = routing_info['probs'].shape[1]
+        probs = routing_info['probs'].numpy()
+        
+        # Heatmap
+        im = axes[ax_idx].imshow(probs.T, aspect='auto', cmap='YlOrRd', vmin=0, vmax=1)
+        axes[ax_idx].set_xlabel("Token Position")
+        axes[ax_idx].set_ylabel("Timeline")
+        axes[ax_idx].set_yticks(range(K))
+        axes[ax_idx].set_yticklabels([f"T{i}" for i in range(K)])
+        axes[ax_idx].set_title(f"Head {head_idx} (Layer {actual_layer})")
+        
+        # Token labels
+        if len(tokens) <= 20:
+            axes[ax_idx].set_xticks(range(len(tokens)))
+            axes[ax_idx].set_xticklabels([t.replace('\n', '\\n')[:6] for t in tokens], 
+                                         rotation=45, ha='right', fontsize=7)
+    
+    plt.suptitle(f"Timeline Routing Across Heads\nText: \"{text[:50]}...\"", fontsize=14)
+    plt.tight_layout()
+    
+    # Save combined
+    combined_path = f"{output_dir}/routing_combined.png"
+    plt.savefig(combined_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"Saved: {combined_path}")
+    
+    # Generate separate heatmap
+    tokens, routing_info, actual_layer = get_routing_assignments(
+        model, text, layer_idx=0, head_idx=0
+    )
+    K = routing_info['probs'].shape[1]
+    probs = routing_info['probs'].numpy()
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    im = ax.imshow(probs.T, aspect='auto', cmap='YlOrRd', vmin=0, vmax=1)
+    ax.set_xlabel("Token Position", fontsize=12)
+    ax.set_ylabel("Timeline", fontsize=12)
+    ax.set_yticks(range(K))
+    ax.set_yticklabels([f"Timeline {i}" for i in range(K)])
+    ax.set_title(f"Routing Probability Heatmap (Layer {actual_layer}, Head 0)\n"
+                 f"Text: \"{text}\"", fontsize=12)
+    
+    if len(tokens) <= 20:
+        ax.set_xticks(range(len(tokens)))
+        ax.set_xticklabels([t.replace('\n', '\\n')[:8] for t in tokens], 
+                          rotation=45, ha='right', fontsize=9)
+    
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Routing Probability")
+    
+    plt.tight_layout()
+    heatmap_path = f"{output_dir}/routing_heatmap.png"
+    plt.savefig(heatmap_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"Saved: {heatmap_path}")
+
+
 def main():
     # Sample text
-    text = "The quick brown fox jumps over the lazy dog in the park."
+    text = "The quick brown fox jumps over the lazy dog"
     
     print("=" * 60)
     print("TIMELINE ROUTING VISUALIZATION")
@@ -217,15 +291,19 @@ def main():
         "interlaced_fss"
     )
     
-    # Get routing for different layers/heads
-    for layer_idx in [0, 3]:  # First sparse layer and a later one
-        for head_idx in [0, 5]:  # Different heads
+    # Generate combined visualization for report
+    print("\nGenerating combined visualizations...")
+    visualize_combined(model, text, "results/figures")
+    
+    # Also generate individual visualizations
+    for layer_idx in [0, 3]:
+        for head_idx in [0, 5]:
             print(f"\nExtracting routing for layer {layer_idx}, head {head_idx}...")
             tokens, routing_info, actual_layer = get_routing_assignments(
                 model, text, layer_idx=layer_idx, head_idx=head_idx
             )
             
-            save_path = f"routing_L{actual_layer}_H{head_idx}.png"
+            save_path = f"results/figures/routing_L{actual_layer}_H{head_idx}.png"
             visualize_routing(tokens, routing_info, actual_layer, head_idx, save_path)
     
     print("\n" + "=" * 60)
