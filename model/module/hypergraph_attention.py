@@ -1,30 +1,33 @@
 """
 HyperGraph Sparse Attention Module.
 
-Implements a novel sparse attention mechanism where tokens are assigned to
-one of K "hyper nodes" (parallel timelines). Each token only attends to
-other tokens in the same hyper node, with separate RoPE per node.
+Partitions the token sequence into K independent timelines per attention head.
+Each token is routed to one timeline via a learned router, and attention is
+computed only within each timeline using timeline-local positional encoding.
 
-Key Features:
-- Per-head routing: each head assigns tokens to K nodes independently
-- Hard assignment with Straight-Through Estimator for differentiable routing
-- Each node runs independent causal attention within its token subset
-- Node-specific RoPE for separate positional encoding per timeline
-- Single kernel call via xformers BlockDiagonalCausalMask
+Architecture:
+    Input (N tokens) → Router → K timelines (each ~N/K tokens)
+                              → Causal attention per timeline (local RoPE)
+                              → Scatter back → Output
 
-Complexity Analysis:
-- Per timeline: (N/K)² attention (only tokens in that timeline)
-- Per head: K timelines × (N/K)² = N²/K total
-- All H heads: H × N²/K
-- Baseline: H × N²
-- Speedup: K× (e.g., 4× with K=4)
+Complexity:
+    Standard attention: O(H × N²)
+    HyperGraph:         O(H × N²/K)  [K timelines × (N/K)² = N²/K per head]
+    Theoretical speedup: K× at long sequences
 
-Memory (KV-cache bandwidth during autoregressive decode):
-- New token attends only to its timeline (~N/K tokens)
-- Theoretical K× bandwidth reduction vs loading full N tokens
+Key Design Choices:
+    - Learned routing: MLP router assigns each token to one of K timelines
+    - Gumbel-Softmax: Stochastic routing during training prevents collapse
+    - Timeline-local RoPE: Positions reset to 0 within each timeline
+    - Load balance loss: Auxiliary loss encourages even token distribution
+    - Single kernel: All timelines processed via xformers BlockDiagonalCausalMask
 
-Requirements:
-- xformers (required for efficient block-sparse attention)
+Limitations:
+    - Batch size restricted to 1 (dynamic sparsity pattern per sample)
+    - Routing overhead dominates at short sequences (<4K tokens)
+
+Dependencies:
+    - xformers (required for block-sparse attention kernel)
 """
 
 import torch
