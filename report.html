@@ -7774,7 +7774,7 @@ Test set: ~284K tokens (552 sequences).</p>
 <td>2.9178</td>
 <td>2.9724</td>
 <td>19.54</td>
-<td>-</td>
+<td>28,500</td>
 </tr>
 <tr>
 <td>chunked_4s2f</td>
@@ -8016,7 +8016,7 @@ Test set: ~284K tokens (552 sequences).</p>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
 <h2 id="4.-Timeline-Routing-Visualization">4. Timeline Routing Visualization<a class="anchor-link" href="#4.-Timeline-Routing-Visualization">¶</a></h2><p>Example routing for the sentence: <em>"The quick brown fox jumps over the lazy dog"</em></p>
-<h3 id="Combined-View:-Multiple-Heads-Comparison">Combined View: Multiple Heads Comparison<a class="anchor-link" href="#Combined-View:-Multiple-Heads-Comparison">¶</a></h3><p><img alt="Combined Routing - All Heads" src="results/figures/routing_combined.png"/></p>
+<h3 id="Combined-View:-Multiple-Heads-Comparison">Combined View: Multiple Heads Comparison<a class="anchor-link" href="#Combined-View:-Multiple-Heads-Comparison">¶</a></h3><p><img alt="Combined Routing - All Heads" src="results/figures/routing_all.png"/></p>
 <h3 id="Routing-Probability-Heatmap">Routing Probability Heatmap<a class="anchor-link" href="#Routing-Probability-Heatmap">¶</a></h3><p><img alt="Routing Heatmap" src="results/figures/routing_heatmap.png"/></p>
 <h3 id="Token-%E2%86%92-Timeline-Assignments-(Layer-1,-Head-0)">Token → Timeline Assignments (Layer 1, Head 0)<a class="anchor-link" href="#Token-%E2%86%92-Timeline-Assignments-(Layer-1,-Head-0)">¶</a></h3><pre><code>Token      Primary    Secondary
 ─────────────────────────────────────────
@@ -8127,38 +8127,32 @@ The        🔵 T1 (82%) + 🔴 T0 (16%)
 <td>+0.4%</td>
 </tr>
 <tr>
-<td>Inference @6K</td>
-<td>157 ms</td>
-<td>157 ms</td>
+<td>Inference @4K</td>
+<td>57.0 ms</td>
+<td>54.0 ms</td>
 <td><strong>Crossover</strong></td>
 </tr>
 <tr>
 <td>Inference @16K</td>
-<td>676 ms</td>
-<td>541 ms</td>
-<td><strong>1.25× faster</strong></td>
+<td>430.9 ms</td>
+<td>320.9 ms</td>
+<td><strong>1.34× faster</strong></td>
 </tr>
 <tr>
 <td>Load Balance</td>
 <td>N/A</td>
-<td>1.4-2.5×</td>
-<td>Acceptable</td>
+<td>1.1-1.2×</td>
+<td>Excellent</td>
 </tr>
 </tbody>
 </table>
 <h3 id="Key-Takeaways">Key Takeaways<a class="anchor-link" href="#Key-Takeaways">¶</a></h3><ol>
 <li>✅ <strong>Quality preserved</strong>: Sparse attention achieves within 1% of baseline quality</li>
-<li>✅ <strong>Long-context speedup</strong>: 1.25× faster at 16K tokens, increasing with length</li>
+<li>✅ <strong>Long-context speedup</strong>: 1.34× faster at 16K tokens, increasing with length</li>
 <li>✅ <strong>Semantic clustering</strong>: Router learns meaningful token groupings</li>
 <li>✅ <strong>Load balance works</strong>: Auxiliary loss prevents routing collapse</li>
-<li>⚠️ <strong>Short-context overhead</strong>: Not beneficial below ~6K tokens (Python overhead)</li>
+<li>⚠️ <strong>Short-context overhead</strong>: Not beneficial below ~4K tokens (routing overhead)</li>
 </ol>
-<h3 id="Future-Directions">Future Directions<a class="anchor-link" href="#Future-Directions">¶</a></h3><ul>
-<li><strong>Triton/CUDA kernels</strong>: Fuse routing operations to reduce Python overhead</li>
-<li><strong>Lower crossover point</strong>: Target 2K tokens for broader applicability</li>
-<li><strong>Larger models</strong>: Scale to 7B+ parameters for production use</li>
-<li><strong>KV cache optimization</strong>: Leverage timeline structure for efficient caching</li>
-</ul>
 </div>
 </div>
 </div>
@@ -8169,30 +8163,49 @@ The        🔵 T1 (82%) + 🔴 T0 (16%)
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="Appendix:-Scripts-Reference">Appendix: Scripts Reference<a class="anchor-link" href="#Appendix:-Scripts-Reference">¶</a></h2><p>All benchmark and visualization scripts are located in <code>scripts/</code>:</p>
-<h3 id="Inference-Speed-Benchmark">Inference Speed Benchmark<a class="anchor-link" href="#Inference-Speed-Benchmark">¶</a></h3><div class="highlight"><pre><span></span>python<span class="w"> </span>scripts/benchmark_inference.py<span class="w"> </span><span class="se">\</span>
+<h2 id="Appendix:-Scripts-Reference">Appendix: Scripts Reference<a class="anchor-link" href="#Appendix:-Scripts-Reference">¶</a></h2><p>All scripts are located in <code>scripts/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Script</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>visualize_routing.py</code></td>
+<td>Generate routing visualizations</td>
+</tr>
+<tr>
+<td><code>benchmark_inference.py</code></td>
+<td>Compare inference speed</td>
+</tr>
+<tr>
+<td><code>analyze_load_balance.py</code></td>
+<td>Analyze timeline load balance</td>
+</tr>
+<tr>
+<td><code>plot_loss_curves.py</code></td>
+<td>Plot training curves</td>
+</tr>
+<tr>
+<td><code>inference_demo.py</code></td>
+<td>Text generation demo</td>
+</tr>
+</tbody>
+</table>
+<h3 id="Usage-Examples">Usage Examples<a class="anchor-link" href="#Usage-Examples">¶</a></h3><div class="highlight"><pre><span></span><span class="c1"># Routing visualization</span>
+python<span class="w"> </span>scripts/visualize_routing.py
+
+<span class="c1"># Inference benchmark</span>
+python<span class="w"> </span>scripts/benchmark_inference.py<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--baseline<span class="w"> </span>results/arch_comparison_768/baseline_checkpoint.pt<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--sparse<span class="w"> </span>results/arch_comparison_768/interlaced_fss_checkpoint.pt<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--output<span class="w"> </span>results/inference_benchmark.json
-</pre></div>
-<h3 id="Load-Balance-Analysis">Load Balance Analysis<a class="anchor-link" href="#Load-Balance-Analysis">¶</a></h3><div class="highlight"><pre><span></span>python<span class="w"> </span>scripts/analyze_load_balance.py<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--sparse<span class="w"> </span>results/arch_comparison_768/interlaced_fss_checkpoint.pt
+
+<span class="c1"># Load balance analysis</span>
+python<span class="w"> </span>scripts/analyze_load_balance.py<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>--checkpoint<span class="w"> </span>results/arch_comparison_768/interlaced_fss_checkpoint.pt<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--arch<span class="w"> </span>interlaced_fss<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--output<span class="w"> </span>results/load_balance.json
-</pre></div>
-<h3 id="Routing-Visualization">Routing Visualization<a class="anchor-link" href="#Routing-Visualization">¶</a></h3><div class="highlight"><pre><span></span>python<span class="w"> </span>scripts/visualize_routing_simple.py
-<span class="c1"># Outputs: timeline_routing.png</span>
-</pre></div>
-<h3 id="Text-Generation-Demo">Text Generation Demo<a class="anchor-link" href="#Text-Generation-Demo">¶</a></h3><div class="highlight"><pre><span></span>python<span class="w"> </span>scripts/inference_demo.py
-<span class="c1"># Generates text from both baseline and sparse models</span>
-</pre></div>
-<h3 id="Full-Training">Full Training<a class="anchor-link" href="#Full-Training">¶</a></h3><div class="highlight"><pre><span></span>python<span class="w"> </span>train/parallel_train.py<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--configs<span class="w"> </span>baseline<span class="w"> </span>interlaced_fss<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--gpus<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--dim<span class="w"> </span><span class="m">768</span><span class="w"> </span>--num_heads<span class="w"> </span><span class="m">12</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--num_hyper_nodes<span class="w"> </span><span class="m">6</span><span class="w"> </span>--top_k<span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--dataset<span class="w"> </span>wikitext-103<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>--output_dir<span class="w"> </span>results/my_experiment
+<span class="w">    </span>--arch<span class="w"> </span>interlaced_fss
 </pre></div>
 </div>
 </div>
