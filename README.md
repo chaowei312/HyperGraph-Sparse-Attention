@@ -193,9 +193,85 @@ Key hyperparameters:
 | OpenWebText | ~8B tokens | HuggingFace |
 | SlimPajama | ~627B tokens | HuggingFace |
 
-## Results
+## Experimental Results
 
-Experiment results are saved as JSON files in `results/` and visualized in `report.ipynb`. Key figures are in `results/figures/`.
+All experiments use 14-layer models with d=512, 8 heads, cosine LR schedule, and PG19 dataset unless noted. Full training logs and figures are in `results/` and `report.ipynb`.
+
+### Ablation Study — Design Choices (Phase 1)
+
+Pure sparse models (all 14 layers sparse) to isolate individual design decisions:
+
+| Ablation | Configuration | Best Val Loss | Steps |
+|----------|---------------|:------------:|:-----:|
+| **Timelines (K)** | K=4, local RoPE | **3.856** | 56K |
+| | K=6, local RoPE | 4.072 | 42K |
+| **RoPE mode** | Local (positions reset) | 3.856 | 56K |
+| | Global (original positions) | **3.657** | 94K |
+| **Router type** | Linear | **3.978** | 48K |
+| | MLP (2-layer) | 4.242 | 26K |
+| **Temperature** | τ=1.0 | **3.956** | 64K |
+| | τ=0.5 (sharper) | 4.005 | 56K |
+
+**Findings:**
+- **K=4 consistently outperforms K=6** — fewer partitions preserve more intra-sequence dependencies
+- **Global RoPE unexpectedly beats local RoPE** for pure-sparse models, though local RoPE converges faster early
+- **Linear router > MLP router** — the simpler router trains more stably and reaches lower loss
+- **Temperature τ=1.0 slightly preferred** over τ=0.5, suggesting exploration helps
+
+### Hybrid Architectures (Phase 2)
+
+Interlaced hybrid models (6 Full + 8 Sparse, `FSSFSSFSSFSSFF`) vs dense baseline, with context length extrapolation:
+
+| Model | RoPE Mode | Val Loss (1024) | Extrap 2× | Extrap 4× | Extrap 8× |
+|-------|-----------|:---------------:|:---------:|:---------:|:---------:|
+| **Dense baseline** | Global | **3.393** | 4.14 | 4.88 | 5.30 |
+| Hybrid (global) | Global | 3.449 | 4.21 | 4.89 | 5.30 |
+| Hybrid (mixed) | Full=global, Sparse=local | 3.448 | 4.22 | 4.96 | — |
+| Hybrid + freq explore | Mixed + random pos scaling | 3.453 | 4.33 | 5.17 | 5.38 |
+
+**Findings:**
+- Dense baseline still achieves the best perplexity at this scale — expected since sparse routing has an inherent information bottleneck
+- Hybrid models close to within **~1.6% of the dense baseline** while replacing 57% of attention layers with O(N²/K) sparse variants
+- **Context length extrapolation remains challenging** — local RoPE does not provide the hoped-for length generalization advantage; all models degrade similarly beyond training length
+- RoPE frequency exploration hurts rather than helps extrapolation
+
+### IsoFLOP Comparison — Reinvesting Compute Savings
+
+When K=6 attention is cheaper (O(N²/6) vs O(N²/4)), we can reinvest the saved FLOPs into more capacity:
+
+| Configuration | K | Layers | Dim | Seq Len | Best Val Loss |
+|---------------|:-:|:------:|:---:|:-------:|:------------:|
+| **K=4 baseline** | 4 | 14 | 512 | 1024 | **3.685** |
+| K=6 + wider | 6 | 14 | 640 | 1024 | 3.736 |
+| K=6 + deeper | 6 | 21 | 512 | 1024 | 3.752 |
+| K=6 + longer context | 6 | 14 | 512 | 1536 | 3.817 |
+
+**Finding:** Under matched compute budgets, **K=4 still wins** — the quality loss from more aggressive partitioning is not recovered by adding width, depth, or context length. This suggests K=4 is near the optimal partition count for this model scale.
+
+### Block Placement Comparison
+
+Architecture placement sweep (dim=768, 12 heads, WikiText-103):
+
+| Architecture | Pattern | Best Val Loss |
+|--------------|---------|:------------:|
+| Bookend | `FFFSSSSSSSSFFF` | Best among hybrids |
+| Interlaced FSS | `FSSFSSFSSFSSFF` | Close second |
+| Reverse bookend | `SSSFFFFFFSSSSS` | Competitive |
+| Early full | `FFFFFFSSSSSSSS` | Moderate |
+| Late full | `SSSSSSSSFFFFFF` | Worst hybrid |
+| Dense baseline | `FFFFFFFFFFFFFF` | Quality ceiling |
+
+**Finding:** **Bookend and interlaced patterns** perform best — having full attention at the first and last layers appears important for the model's ability to form and consolidate representations.
+
+### Summary & Takeaways
+
+1. **The mechanism works**: Learned routing successfully partitions tokens into timelines with meaningful load balance, achieving near-dense quality at reduced attention cost
+2. **K=4 is the sweet spot** for this model scale — more partitions hurt quality without sufficient compute recovery
+3. **Block placement matters**: Bookend/interlaced patterns significantly outperform naive stacking
+4. **Honest limitation**: At small scale (512d/14L), the dense baseline still wins on raw perplexity. The value proposition is for **longer sequences** where O(N²/K) savings become dominant
+5. **Length extrapolation remains open**: Local RoPE did not provide the expected generalization benefit in our experiments
+
+See `report.ipynb` for full training curves, routing visualizations, and detailed analysis.
 
 ## License
 
