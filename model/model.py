@@ -85,6 +85,12 @@ class ModelConfig:
     top_k: int = 1  # Number of timelines each token routes to (1=hard routing, 2=soft routing)
     router_temperature: float = 1.0  # Gumbel-Softmax temperature (higher = more exploration)
     entropy_weight: float = 0.01  # Weight for entropy regularization in router aux loss
+    router_type: str = "linear"  # "linear" or "mlp" (2-layer with feature extraction)
+    use_local_rope: bool = True  # Timeline-local (True) or global (False) RoPE
+    use_mixed_rope: bool = False  # If True: Full layers use global RoPE, Sparse layers use local RoPE
+    use_rope_freq_exploration: bool = False  # Random position scaling per timeline (for length generalization)
+    rope_freq_range: tuple = (1.0, 4.0)  # Range of position multipliers when freq_exploration is enabled
+    use_confidence_gate: bool = False  # Gated attention (prevents attention sink problem)
     
     # Vocabulary & sequence
     vocab_size: int = 50257  # GPT-2 tokenizer
@@ -169,8 +175,15 @@ class ModelConfig:
             causal=True,
         )
     
-    def get_sparse_block_config(self) -> SparseBlockConfig:
-        """Get SparseBlockConfig for sparse layers."""
+    def get_sparse_block_config(self, use_local_rope_override: Optional[bool] = None) -> SparseBlockConfig:
+        """
+        Get SparseBlockConfig for sparse layers.
+        
+        Args:
+            use_local_rope_override: If provided, overrides the default use_local_rope setting.
+                                    Used by mixed RoPE mode to set local RoPE for sparse layers.
+        """
+        local_rope = use_local_rope_override if use_local_rope_override is not None else self.use_local_rope
         return SparseBlockConfig(
             dim=self.dim,
             num_heads=self.num_heads,
@@ -187,6 +200,11 @@ class ModelConfig:
             router_temperature=self.router_temperature,
             entropy_weight=self.entropy_weight,
             top_k=self.top_k,
+            router_type=self.router_type,
+            use_local_rope=local_rope,
+            use_rope_freq_exploration=self.use_rope_freq_exploration,
+            rope_freq_range=self.rope_freq_range,
+            use_confidence_gate=self.use_confidence_gate,
         )
     
     def describe_architecture(self) -> str:
@@ -248,7 +266,12 @@ class CausalLM(nn.Module):
         
         # Build layers according to block pattern
         block_config = config.get_block_config()
-        sparse_config = config.get_sparse_block_config()
+        
+        # For mixed RoPE mode: Full layers use global RoPE, Sparse layers use local RoPE
+        if config.use_mixed_rope:
+            sparse_config = config.get_sparse_block_config(use_local_rope_override=True)
+        else:
+            sparse_config = config.get_sparse_block_config()
         
         self.layers = nn.ModuleList()
         

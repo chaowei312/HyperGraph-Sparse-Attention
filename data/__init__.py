@@ -22,9 +22,11 @@ from .fast_tokenizer import FastTokenizer
 from .dataset import (
     TextDataset,
     StreamingTextDataset,
+    PG19StreamingDataset,
     load_gutenberg,
     load_wikitext,
     load_openwebtext,
+    load_pg19_static,
     create_dataloaders,
 )
 
@@ -32,8 +34,10 @@ __all__ = [
     "FastTokenizer",
     "TextDataset",
     "StreamingTextDataset",
+    "PG19StreamingDataset",
     "load_gutenberg",
     "load_wikitext",
     "load_openwebtext",
+    "load_pg19_static",
     "create_dataloaders",
 ]

@@ -58,6 +58,28 @@ from .mixture_of_heads_attention import (
     MoHSparseAttentionSimple,
 )
 
+from .hypergraph_fixed_capacity import (
+    HyperGraphFixedCapacity,
+    HyperGraphFixedCapacityBatched,
+    FixedCapacityRoPE,
+    create_fixed_capacity_hypergraph,
+)
+
+from .hypergraph_optimized import (
+    HyperGraphOptimizedAttention,
+    create_optimized_hypergraph,
+)
+
+from .fixed_capacity_block import (
+    FixedCapacityBlockConfig,
+    FixedCapacityDecoderBlock,
+    FixedCapacityModelConfig,
+    FixedCapacityCausalLM,
+    FullCausalAttention,
+    create_hybrid_model,
+    create_pure_sparse_model,
+)
+
 
 __all__ = [
     # Flash Attention
@@ -91,5 +113,21 @@ __all__ = [
     "MixtureOfHeadsAttention",
     "GQAMixtureOfHeadsAttention",
     "MoHSparseAttentionSimple",
+    # Fixed-Capacity HyperGraph (batching-friendly, FlashAttention compatible)
+    "HyperGraphFixedCapacity",
+    "HyperGraphFixedCapacityBatched",
+    "FixedCapacityRoPE",
+    "create_fixed_capacity_hypergraph",
+    # Optimized HyperGraph (expert-choice routing)
+    "HyperGraphOptimizedAttention",
+    "create_optimized_hypergraph",
+    # Fixed-Capacity Complete Model Components
+    "FixedCapacityBlockConfig",
+    "FixedCapacityDecoderBlock",
+    "FixedCapacityModelConfig",
+    "FixedCapacityCausalLM",
+    "FullCausalAttention",
+    "create_hybrid_model",
+    "create_pure_sparse_model",
 ]
 

@@ -151,6 +151,11 @@ class HyperGraphSparseAttention(nn.Module):
         rope_base: float = 10000.0,
         router_temperature: float = 1.0,
         entropy_weight: float = 0.01,
+        router_type: str = "linear",  # "linear" or "mlp"
+        use_local_rope: bool = True,  # Timeline-local (True) or global (False) RoPE
+        use_rope_freq_exploration: bool = False,  # Random position scaling per timeline
+        rope_freq_range: tuple = (1.0, 4.0),  # Range of position multipliers
+        use_confidence_gate: bool = False,  # Gated attention (prevents attention sink)
         use_compile: bool = False,  # torch.compile (not beneficial with dynamic seq_len)
     ):
         super().__init__()
@@ -171,6 +176,11 @@ class HyperGraphSparseAttention(nn.Module):
         # Gumbel-Softmax parameters for exploration
         self.router_temperature = router_temperature
         self.entropy_weight = entropy_weight
+        self.router_type = router_type
+        self.use_local_rope = use_local_rope
+        self.use_rope_freq_exploration = use_rope_freq_exploration
+        self.rope_freq_range = rope_freq_range
+        self.use_confidence_gate = use_confidence_gate
         
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
         assert num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
@@ -181,12 +191,35 @@ class HyperGraphSparseAttention(nn.Module):
         self.k_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, self.num_kv_heads * self.head_dim, bias=bias)
         
-        # Node routing projection: d_model -> num_heads * num_hyper_nodes
+        # Node routing: d_model -> num_heads * num_hyper_nodes
         # Each head independently routes to K nodes
-        self.node_router = nn.Linear(embed_dim, num_heads * num_hyper_nodes, bias=bias)
+        if router_type == "mlp":
+            # 2-layer MLP: feature extraction layer + linear head
+            hidden_dim = embed_dim // 2
+            self.node_router = nn.Sequential(
+                nn.Linear(embed_dim, hidden_dim, bias=bias),
+                nn.GELU(),
+                nn.Linear(hidden_dim, num_heads * num_hyper_nodes, bias=bias),
+            )
+        else:
+            # Linear router (default)
+            self.node_router = nn.Linear(embed_dim, num_heads * num_hyper_nodes, bias=bias)
         
         # Output projection
         self.out_proj = nn.Linear(num_heads * self.head_dim, embed_dim, bias=bias)
+        
+        # Confidence gate (Gated Attention - prevents attention sink)
+        # Gate learns to "turn off" attention when no relevant tokens found
+        # Uses attention output to compute gate (can assess "did I find something useful?")
+        # Reference: GTrXL, Gated Attention Unit, GLA Transformers
+        if use_confidence_gate:
+            # Gate computed from attention output (per-head)
+            # Input: attention output (batch, heads, seq, head_dim)
+            # Output: gate values (batch, heads, seq, 1)
+            self.confidence_gate = nn.Linear(self.head_dim, 1, bias=True)
+            # Initialize gate bias slightly positive so attention passes through initially
+            nn.init.zeros_(self.confidence_gate.weight)
+            nn.init.constant_(self.confidence_gate.bias, 2.0)  # sigmoid(2) ≈ 0.88
         
         # HyperGraph RoPE (shared cos/sin cache for all timelines)
         self.rope = HyperGraphRoPE(
@@ -373,25 +406,47 @@ class HyperGraphSparseAttention(nn.Module):
         # Get sorted node assignments
         sorted_nodes = torch.gather(node_assign_2d, 1, sorted_indices)
         
-        # === POSITION COMPUTATION (unique_consecutive) ===
-        sorted_nodes_flat = sorted_nodes.flatten()
-        _, inverse, counts_per_segment = torch.unique_consecutive(
-            sorted_nodes_flat, return_inverse=True, return_counts=True
-        )
-        
-        # Segment starts
-        segment_ends = counts_per_segment.cumsum(0)
-        segment_starts = torch.zeros_like(segment_ends)
-        segment_starts[1:] = segment_ends[:-1]
-        
-        # Position within segment
-        token_segment_starts = segment_starts[inverse]
-        global_indices = torch.arange(H * seq_len, device=device, dtype=torch.long)
-        positions_in_group_flat = global_indices - token_segment_starts
-        
-        # Add KV cache offsets
-        offsets = torch.gather(node_counts_flat, 1, sorted_nodes).flatten()
-        positions = positions_in_group_flat + offsets
+        # === POSITION COMPUTATION ===
+        if self.use_local_rope:
+            # Timeline-local RoPE: positions reset to 0 within each timeline
+            sorted_nodes_flat = sorted_nodes.flatten()
+            _, inverse, counts_per_segment = torch.unique_consecutive(
+                sorted_nodes_flat, return_inverse=True, return_counts=True
+            )
+            
+            # Segment starts
+            segment_ends = counts_per_segment.cumsum(0)
+            segment_starts = torch.zeros_like(segment_ends)
+            segment_starts[1:] = segment_ends[:-1]
+            
+            # Position within segment
+            token_segment_starts = segment_starts[inverse]
+            global_indices = torch.arange(H * seq_len, device=device, dtype=torch.long)
+            positions_in_group_flat = global_indices - token_segment_starts
+            
+            # === FREQUENCY EXPLORATION (for length generalization) ===
+            # During training, randomly scale positions per timeline to simulate longer sequences
+            if self.training and self.use_rope_freq_exploration:
+                min_mult, max_mult = self.rope_freq_range
+                # Generate random multiplier per timeline (same for all heads)
+                # Shape: (K,) - one multiplier per timeline
+                freq_multipliers = torch.empty(
+                    self.num_hyper_nodes, device=device, dtype=torch.float32
+                ).uniform_(min_mult, max_mult)
+                # Get multiplier for each token based on its timeline assignment
+                # sorted_nodes_flat contains timeline indices, use modulo to handle head dimension
+                timeline_indices = sorted_nodes_flat % self.num_hyper_nodes
+                token_multipliers = freq_multipliers[timeline_indices]
+                # Scale positions (convert to float, scale, convert back to long)
+                positions_in_group_flat = (positions_in_group_flat.float() * token_multipliers).long()
+            
+            # Add KV cache offsets
+            offsets = torch.gather(node_counts_flat, 1, sorted_nodes).flatten()
+            positions = positions_in_group_flat + offsets
+        else:
+            # Global RoPE: preserve original positions (for ablation study)
+            # sorted_indices contains the original positions, just repeated across heads
+            positions = sorted_indices.flatten()  # Original positions in sorted order
         
         return gather_idx, positions, sorted_nodes
     
@@ -599,6 +654,16 @@ class HyperGraphSparseAttention(nn.Module):
         # STE: hard forward (use output as-is), soft backward (gradient through weights)
         # Router learns from aux_loss, not from "this timeline was better"
         out = out * primary_weights.detach() + out.detach() * (primary_weights - primary_weights.detach())
+        
+        # === CONFIDENCE GATE (Gated Attention) ===
+        # Prevents attention sink by learning when to "turn off" attention output
+        # Gate computed from attention OUTPUT - can assess "did I find something useful?"
+        # Reference: GTrXL, Gated Attention Unit, GLA Transformers
+        if self.use_confidence_gate:
+            # out shape: (batch, heads, seq, head_dim)
+            # Compute gate from attention output per head per position
+            gate = torch.sigmoid(self.confidence_gate(out))  # (batch, heads, seq, 1)
+            out = out * gate  # Apply per-head gating
         
         # === UPDATE NODE COUNTS FOR KV CACHE ===
         node_onehot = F.one_hot(node_assignments, K).float()

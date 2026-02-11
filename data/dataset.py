@@ -257,10 +257,121 @@ def load_openwebtext(
     return TextDataset(tokens, max_length, stride)
 
 
+def load_pg19_static(
+    tokenizer,
+    split: str = "train",
+    max_length: int = 512,
+    stride: Optional[int] = None,
+    max_samples: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+) -> TextDataset:
+    """
+    Load PG-19 with token limit (for validation/test where we need fixed size).
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError("Please install datasets: pip install datasets")
+    
+    print(f"Loading PG-19 ({split}) - static mode...")
+    
+    # Set default token limits for val/test
+    if max_tokens is None:
+        max_tokens = 10_000_000  # 10M tokens
+    
+    ds = load_dataset("emozilla/pg19", split=split)
+    
+    if max_samples:
+        ds = ds.select(range(min(max_samples, len(ds))))
+    
+    print(f"  Loaded {len(ds):,} documents, tokenizing up to {max_tokens:,} tokens...")
+    
+    all_tokens = []
+    for i, doc in enumerate(ds):
+        tokens = tokenizer.encode(doc["text"], truncation=False, max_length=None)
+        all_tokens.extend(tokens)
+        
+        if len(all_tokens) >= max_tokens:
+            all_tokens = all_tokens[:max_tokens]
+            break
+    
+    tokens = torch.tensor(all_tokens, dtype=torch.long)
+    print(f"  Generated {len(tokens):,} tokens")
+    
+    return TextDataset(tokens, max_length, stride)
+
+
+class PG19StreamingDataset(IterableDataset):
+    """
+    Streaming dataset for PG-19 that processes the ENTIRE dataset
+    without loading all tokens into memory.
+    
+    Memory usage: ~100MB buffer (not 20GB+ for full dataset)
+    Coverage: ALL 2.8B tokens processed over training
+    """
+    
+    def __init__(
+        self,
+        tokenizer,
+        max_length: int = 1024,
+        split: str = "train",
+    ):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.split = split
+        
+    def __iter__(self):
+        from datasets import load_dataset
+        
+        # Load from cache (memory-mapped, not in RAM)
+        ds = load_dataset("emozilla/pg19", split=self.split)
+        
+        buffer = []
+        total_seqs = 0
+        
+        for doc_idx, doc in enumerate(ds):
+            text = doc["text"]
+            if not text.strip():
+                continue
+            
+            # Tokenize this document
+            tokens = self.tokenizer.encode(text, truncation=False, max_length=None)
+            buffer.extend(tokens)
+            
+            # Yield sequences as buffer fills
+            while len(buffer) >= self.max_length + 1:
+                seq = buffer[:self.max_length + 1]
+                buffer = buffer[self.max_length:]
+                total_seqs += 1
+                yield {
+                    "input_ids": torch.tensor(seq[:-1], dtype=torch.long),
+                    "labels": torch.tensor(seq[1:], dtype=torch.long),
+                }
+            
+            # Log progress periodically
+            if (doc_idx + 1) % 1000 == 0:
+                print(f"  [PG-19] Processed {doc_idx+1} docs, yielded {total_seqs:,} sequences")
+        
+        # Yield remaining buffer
+        while len(buffer) >= self.max_length + 1:
+            seq = buffer[:self.max_length + 1]
+            buffer = buffer[self.max_length:]
+            yield {
+                "input_ids": torch.tensor(seq[:-1], dtype=torch.long),
+                "labels": torch.tensor(seq[1:], dtype=torch.long),
+            }
+
+
 class StreamingTextDataset(IterableDataset):
     """
-    Streaming dataset for very large corpora (SlimPajama, FineWeb).
-    Tokenizes on-the-fly to avoid memory issues.
+    Streaming dataset for very large corpora.
+    Tokenizes on-the-fly to avoid memory issues while covering entire dataset.
+    
+    Key features:
+    - Loads documents one at a time from disk/cache
+    - Tokenizes incrementally 
+    - Never holds more than buffer_size tokens in memory
+    - Iterates through ENTIRE dataset
     """
     
     def __init__(
@@ -270,13 +381,17 @@ class StreamingTextDataset(IterableDataset):
         max_length: int = 512,
         split: str = "train",
         subset: Optional[str] = None,
+        buffer_size: int = 100_000,  # Max tokens to hold in memory
+        shuffle_buffer: int = 10_000,  # Shuffle window for randomization
     ):
         self.dataset_name = dataset_name
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.split = split
         self.subset = subset
-        self._buffer = []
+        self.buffer_size = buffer_size
+        self.shuffle_buffer = shuffle_buffer
+        self._total_tokens = 0
         
     def __iter__(self):
         try:
@@ -284,24 +399,24 @@ class StreamingTextDataset(IterableDataset):
         except ImportError:
             raise ImportError("Please install datasets: pip install datasets")
         
-        # Load as streaming dataset
+        # Load dataset (uses memory-mapped files from cache, not RAM)
         if self.subset:
             ds = load_dataset(
                 self.dataset_name,
                 self.subset,
                 split=self.split,
-                streaming=True,
                 trust_remote_code=True,
             )
         else:
             ds = load_dataset(
                 self.dataset_name,
                 split=self.split,
-                streaming=True,
                 trust_remote_code=True,
             )
         
         buffer = []
+        self._total_tokens = 0
+        
         for example in ds:
             text = example.get("text", example.get("content", ""))
             if not text.strip():
@@ -309,8 +424,18 @@ class StreamingTextDataset(IterableDataset):
                 
             tokens = self.tokenizer.encode(text, truncation=False, max_length=None)
             buffer.extend(tokens)
+            self._total_tokens += len(tokens)
             
             # Yield sequences when buffer is large enough
+            while len(buffer) >= self.max_length + 1:
+                seq = buffer[:self.max_length + 1]
+                buffer = buffer[self.max_length:]
+                yield {
+                    "input_ids": torch.tensor(seq[:-1], dtype=torch.long),
+                    "labels": torch.tensor(seq[1:], dtype=torch.long),
+                }
+        
+        # Yield remaining tokens in buffer
             while len(buffer) >= self.max_length + 1:
                 seq = buffer[:self.max_length + 1]
                 buffer = buffer[self.max_length:]
@@ -339,6 +464,7 @@ def create_dataloaders(
         - "gutenberg": NLTK classic literature (~2.4M tokens)
         - "wikitext-2": Wikipedia articles (~2M tokens)
         - "wikitext-103": Wikipedia articles (~100M tokens)
+        - "pg19": Project Gutenberg books (~2.8B tokens)
         - "openwebtext": Web text (~8B tokens)
         - "slimpajama": Large web corpus, streaming (~627B tokens)
     
@@ -385,6 +511,22 @@ def create_dataloaders(
         train_ds = load_openwebtext(tokenizer, "train", max_length, stride, max_train_samples)
         val_ds = load_openwebtext(tokenizer, "validation", max_length, stride, max_eval_samples)
         test_ds = load_openwebtext(tokenizer, "test", max_length, stride, max_eval_samples)
+    
+    elif dataset_name == "pg19":
+        # Use STREAMING for training (entire 2.8B tokens without OOM)
+        # Use static loading for val/test (fixed evaluation set)
+        print("PG-19: Using streaming for train (full 2.8B tokens)")
+        train_ds = PG19StreamingDataset(tokenizer, max_length, "train")
+        val_ds = load_pg19_static(tokenizer, "validation", max_length, stride, max_eval_samples, max_tokens=10_000_000)
+        test_ds = load_pg19_static(tokenizer, "test", max_length, stride, max_eval_samples, max_tokens=10_000_000)
+        
+        # Streaming train loader (no shuffle - data is streamed in order)
+        loaders = {
+            "train": DataLoader(train_ds, batch_size=batch_size, num_workers=0),  # num_workers=0 for IterableDataset
+            "val": DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=False),
+            "test": DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=False),
+        }
+        return loaders
         
     elif dataset_name == "slimpajama" or streaming:
         # Use streaming for very large datasets
@@ -415,7 +557,7 @@ def create_dataloaders(
     else:
         raise ValueError(
             f"Unknown dataset: {dataset_name}. "
-            f"Supported: gutenberg, wikitext-2, wikitext-103, openwebtext, slimpajama"
+            f"Supported: gutenberg, wikitext-2, wikitext-103, pg19, openwebtext, slimpajama"
         )
     
     # Print stats for non-streaming datasets

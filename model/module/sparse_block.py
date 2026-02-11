@@ -71,6 +71,11 @@ class SparseBlockConfig:
     router_temperature: float = 1.0
     entropy_weight: float = 0.01
     top_k: int = 1  # Number of timelines each token routes to
+    router_type: str = "linear"  # "linear" or "mlp" (2-layer with feature extraction)
+    use_local_rope: bool = True  # Timeline-local (True) or global (False) RoPE
+    use_rope_freq_exploration: bool = False  # Random position scaling per timeline (for length generalization)
+    rope_freq_range: tuple = (1.0, 4.0)  # Range of position multipliers when freq_exploration is enabled
+    use_confidence_gate: bool = False  # Gated attention (prevents attention sink problem)
     
     def __post_init__(self):
         """Compute derived values."""
@@ -163,6 +168,11 @@ class SparseDecoderBlock(nn.Module):
             router_temperature=config.router_temperature,
             entropy_weight=config.entropy_weight,
             top_k=config.top_k,
+            router_type=config.router_type,
+            use_local_rope=config.use_local_rope,
+            use_rope_freq_exploration=config.use_rope_freq_exploration,
+            rope_freq_range=config.rope_freq_range,
+            use_confidence_gate=config.use_confidence_gate,
         )
         
         # SwiGLU feed-forward network
