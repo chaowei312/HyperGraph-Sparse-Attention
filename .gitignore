@@ -54,3 +54,11 @@ results/full_comparison/
 # - results/test_topk_full/
 # - results/test_parallel/
 # - results/figures/
+
+# Generated HTML reports
+report.html
+*.html
+
+# IDE config
+.cursorignore
+.cursor/
